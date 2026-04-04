@@ -6,6 +6,9 @@ Unlike traditional tools that only calculate average methylation rates per CpG s
 
 **💡 This tool is readily accessible via a web browser at <https://huggingface.co/spaces/kubo-azu/PANDA>, requiring no local installation for end-users.**
 
+**💡 Please cite this paper if you use this app in your research:** <br>
+Kubota, A., Kobayashi, H., & Tajima, A. (2026). PANDA: Read-Level Phased Analysis of DNA Amplicons for Methylation Studies. *bioRxiv*. <https://doi.org/10.64898/2026.04.01.715790>.
+
 ## 🌟 Key Features
 
 ### Dual Mode Architecture:
