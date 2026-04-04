@@ -616,6 +616,12 @@ ui <- page_navbar(
                 a("https://github.com/kubo-azu/PANDA", 
                   href = "https://github.com/kubo-azu/PANDA", 
                   target = "_blank"),
+                ".",
+                br(),
+                "Please cite this paper if you use this app in your research: Kubota, A., Kobayashi, H., & Tajima, A. (2026). PANDA: Read-Level Phased Analysis of DNA Amplicons for Methylation Studies. bioRxiv. ",
+                a("https://doi.org/10.64898/2026.04.01.715790", 
+                  href = "https://doi.org/10.64898/2026.04.01.715790", 
+                  target = "_blank"),
                 "."
               ),
               
