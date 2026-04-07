@@ -296,6 +296,12 @@ PANDA's Sanger mode provides deep inspection of clonal sequences (e.g., TA cloni
 4. Go to the **"Compare Groups"** section in the sidebar. Assign WT clones to Group 1 and KO clones to Group 2, and click **[Run Comparison]**.
    * **Result**: PANDA seamlessly performs statistical comparisons for Sanger sequencing data. The Difference Plot will reveal the exact same single-base TF footprint shift (WT vs KO) observed in the NGS data, proving PANDA's robust performance even with small clonal sample sizes.
 
+## 🛡️ Data Privacy & Security
+
+PANDA is designed with strict data privacy in mind, especially for researchers handling sensitive human epigenetic data.
+
+- **Web Server:** When using the public Hugging Face Spaces web server, all uploaded sequence files are processed on-the-fly in an isolated, temporary environment. The application is explicitly programmed to **automatically and permanently delete** all uploaded data and intermediate files immediately upon session termination or when the reset button is clicked. We do not permanently store, log, or track any user-uploaded data.
+- **Local Execution:** For researchers operating under strict Institutional Review Board (IRB) policies that prohibit uploading raw sequence data to external servers, we recommend running PANDA locally. You can easily launch the application on your own machine (see **📦 Installation** section above).
 
 ## 🗝️ License
 
