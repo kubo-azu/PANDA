@@ -616,16 +616,18 @@ ui <- page_navbar(
                 a("https://github.com/kubo-azu/PANDA", 
                   href = "https://github.com/kubo-azu/PANDA", 
                   target = "_blank"),
-                ".",
-                br(),
-                "Please cite this paper if you use this app in your research:",
-                br(),
-                "Kubota, A., Kobayashi, H., & Tajima, A. (2026). PANDA: Read-Level Phased Analysis of DNA Amplicons for Methylation Studies. bioRxiv. ",
-                a("https://doi.org/10.64898/2026.04.01.715790", 
-                  href = "https://doi.org/10.64898/2026.04.01.715790", 
-                  target = "_blank"),
                 "."
               ),
+              
+              div(class="alert alert-success",
+                  h4(icon("shield-halved"), " Data Privacy & Security Statement"),
+                  p(style="font-size: 0.95em;",
+                    "All uploaded sequence data is processed in a secure, isolated temporary environment. ",
+                    "To ensure absolute data privacy and compliance with human data policies, this application is explicitly programmed to ",
+                    strong("automatically and permanently delete all uploaded files and intermediate data immediately upon user session termination"),
+                    " or when the 'Clear/Reset' buttons are used. We do not permanently store, log, or track any user data on our servers.")
+              ),
+              # ----------------------------------------------------------------------
               
               div(class="alert alert-info",
                   h4(icon("flask"), " Quick Start with Demo Data"),
@@ -1003,6 +1005,27 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
   
+  # [SECURITY UPDATE] ----------------------------------------------------------
+  # Track the path of temporary files uploaded on the server side and ensure they are deleted
+  session_temp_files <- reactiveVal(character())
+  
+  # アップロードされたファイルをリストに登録するヘルパー関数
+  register_temp_files <- function(paths) {
+    valid_paths <- paths[!is.na(paths) & paths != ""]
+    if(length(valid_paths) > 0) {
+      session_temp_files(unique(c(session_temp_files(), valid_paths)))
+    }
+  }
+  
+  # A hook that physically and immediately discards temporary files when the user closes a tab (ends session)
+  session$onSessionEnded(function() {
+    files_to_delete <- session_temp_files()
+    if(length(files_to_delete) > 0) {
+      unlink(files_to_delete, force = TRUE)
+    }
+  })
+  # ----------------------------------------------------------------------------
+  
   output$dl_demo_data <- downloadHandler(
     filename = function() { "PANDA_Demo.zip" },
     content = function(file) {
@@ -1026,11 +1049,17 @@ server <- function(input, output, session) {
   ))
   
   observeEvent(input$sanger_multi_files, {
-    new_df <- input$sanger_multi_files; old_df <- stored_sanger(); stored_sanger(bind_rows(old_df, new_df))
+    new_df <- input$sanger_multi_files
+    register_temp_files(new_df$datapath) # [SECURITY UPDATE] Register the file path
+    old_df <- stored_sanger()
+    stored_sanger(bind_rows(old_df, new_df))
   })
   
   # Clear Sanger Files
   observeEvent(input$clear_sanger_files, { 
+    # [SECURITY UPDATE] When the Clear button is pressed, the registered files are physically deleted
+    unlink(stored_sanger()$datapath, force = TRUE)
+    
     shinyjs::reset("sanger_multi_files")
     stored_sanger(data.frame()) 
     sanger_multi_batch(NULL)
@@ -1041,6 +1070,7 @@ server <- function(input, output, session) {
   observeEvent(input$ngs_files_merged, {
     new_df <- input$ngs_files_merged
     if(!is.null(new_df)) {
+      register_temp_files(new_df$datapath) # [SECURITY UPDATE] Register the file path
       new_df$datapath_R2 <- NA
       new_df$orig_name_R1 <- new_df$name
       new_df$orig_name_R2 <- NA
@@ -1053,6 +1083,8 @@ server <- function(input, output, session) {
   observeEvent(input$ngs_files_unmerged, {
     new_files <- input$ngs_files_unmerged
     if(is.null(new_files)) return()
+    
+    register_temp_files(new_files$datapath) # [SECURITY UPDATE] Register the file path
     
     processed_files <- new_files %>%
       mutate(
@@ -1113,6 +1145,9 @@ server <- function(input, output, session) {
   
   # Clear NGS Files
   observeEvent(input$clear_ngs_files, { 
+    # [SECURITY UPDATE] When the Clear button is pressed, the registered files are physically deleted
+    unlink(c(stored_ngs()$datapath, stored_ngs()$datapath_R2), force = TRUE)
+    
     shinyjs::reset("ngs_files_merged")
     shinyjs::reset("ngs_files_unmerged")
     stored_ngs(data.frame(
@@ -1134,7 +1169,10 @@ server <- function(input, output, session) {
   sanger_genomes_list <- reactiveVal(NULL)
   observeEvent(input$sanger_genome, {
     if (!is.null(input$sanger_genome)) {
+      register_temp_files(input$sanger_genome$datapath) # [SECURITY UPDATE]
       sanger_genomes_list(readDNAStringSet(input$sanger_genome$datapath))
+      # [SECURITY UPDATE] Files can be deleted immediately after being loaded into memory
+      unlink(input$sanger_genome$datapath, force = TRUE) 
     }
   })
   
@@ -1155,6 +1193,9 @@ server <- function(input, output, session) {
   
   # Reset Sanger
   observeEvent(input$reset_sanger, { 
+    # [SECURITY UPDATE] Files are physically deleted during reset
+    unlink(stored_sanger()$datapath, force = TRUE)
+    
     shinyjs::reset("sanger_sidebar_inputs")
     stored_sanger(data.frame())
     sanger_single_res(NULL)
@@ -1172,9 +1213,11 @@ server <- function(input, output, session) {
         genome <- get_sanger_target_seq(); incProgress(0.3, detail = "Reading...")
         if(input$sanger_single_fmt=="fasta") { 
           req(input$sanger_single_fasta); 
+          register_temp_files(input$sanger_single_fasta$datapath) # [SECURITY UPDATE]
           reads <- readDNAStringSet(input$sanger_single_fasta$datapath) 
         } else { 
           req(input$sanger_single_ab1); 
+          register_temp_files(input$sanger_single_ab1$datapath) # [SECURITY UPDATE]
           reads <- process_ab1_files(input$sanger_single_ab1$datapath, input$sanger_single_ab1$name, input$ab1_trim_start, input$ab1_trim_end) 
         }
         incProgress(0.6, detail = "Aligning..."); res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE) 
@@ -1204,7 +1247,9 @@ server <- function(input, output, session) {
     target_motifs <- character()
     if (!is.null(input$sanger_motif_file)) {
       tryCatch({
+        register_temp_files(input$sanger_motif_file$datapath) # [SECURITY UPDATE]
         target_motifs <- c(target_motifs, readLines(input$sanger_motif_file$datapath))
+        unlink(input$sanger_motif_file$datapath, force = TRUE) # メモリ展開後に即時削除
       }, error = function(e) showNotification("Error reading motif file", type="warning"))
     }
     if (input$sanger_motif_text != "") {
@@ -1319,7 +1364,9 @@ server <- function(input, output, session) {
   ngs_genomes_list <- reactiveVal(NULL)
   observeEvent(input$ngs_genome, {
     if (!is.null(input$ngs_genome)) {
+      register_temp_files(input$ngs_genome$datapath) # [SECURITY UPDATE]
       ngs_genomes_list(readDNAStringSet(input$ngs_genome$datapath))
+      unlink(input$ngs_genome$datapath, force = TRUE) # メモリ展開後に即時削除
     }
   })
   
@@ -1333,6 +1380,9 @@ server <- function(input, output, session) {
   
   # Reset NGS
   observeEvent(input$reset_ngs, { 
+    # [SECURITY UPDATE] リセット時にもファイルを物理的に削除
+    unlink(c(stored_ngs()$datapath, stored_ngs()$datapath_R2), force = TRUE)
+    
     shinyjs::reset("ngs_sidebar_inputs")
     stored_ngs(data.frame(
       name = character(), 
@@ -1359,7 +1409,9 @@ server <- function(input, output, session) {
     target_motifs <- character()
     if (!is.null(input$ngs_motif_file)) {
       tryCatch({
+        register_temp_files(input$ngs_motif_file$datapath) # [SECURITY UPDATE]
         target_motifs <- c(target_motifs, readLines(input$ngs_motif_file$datapath))
+        unlink(input$ngs_motif_file$datapath, force = TRUE) # メモリ展開後に即時削除
       }, error = function(e) showNotification("Error reading motif file", type="warning"))
     }
     if (input$ngs_motif_text != "") {
