@@ -93,7 +93,7 @@ If you want to keep the files on your local machine or use `renv`:
 1. Clone this repository
 
    ```bash
-   git clone [https://github.com/kubo-azu/PANDA.git](https://github.com/kubo-azu/PANDA.git)
+   git clone https://github.com/kubo-azu/PANDA.git
    ```
 
 2. Navigate to the cloned directory in R, or open the `PANDA.Rproj` file in RStudio
