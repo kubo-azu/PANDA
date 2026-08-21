@@ -7,16 +7,6 @@ library(bslib)
 library(patchwork)
 library(sangerseqR)
 
-# Bioconductor 3.19+ provides pairwise alignment helpers through pwalign.
-# Keep the single-file app compatible with older Biostrings installations.
-.panda_has_pwalign <- requireNamespace("pwalign", quietly = TRUE)
-.panda_pairwiseAlignment <- function(...) {
-  if (.panda_has_pwalign) pwalign::pairwiseAlignment(...) else Biostrings::pairwiseAlignment(...)
-}
-.panda_nucleotideSubstitutionMatrix <- function(...) {
-  if (.panda_has_pwalign) pwalign::nucleotideSubstitutionMatrix(...) else Biostrings::nucleotideSubstitutionMatrix(...)
-}
-
 # ==============================================================================
 # 0. GLOBAL SETTINGS
 # ==============================================================================
@@ -38,7 +28,7 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
   # ----------------------------------------------------------------------------
   # Alignment Scoring Parameters
   # ----------------------------------------------------------------------------
-  sub_mat <- .panda_nucleotideSubstitutionMatrix(match = 1, mismatch = -3, baseOnly = FALSE)
+  sub_mat <- nucleotideSubstitutionMatrix(match = 1, mismatch = -3, baseOnly = FALSE)
   gap_op <- -10  # Biostrings default for strict gap opening
   gap_ext <- -4  # Biostrings default for strict gap extension
   
@@ -62,12 +52,12 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
         r <- as.character(test_reads[[i]])
         
         r_F <- r; r_F_T <- chartr("C", "T", r_F)
-        aln_F <- .panda_pairwiseAlignment(pattern = r_F_T, subject = gen_T, type = "local", 
+        aln_F <- pairwiseAlignment(pattern = r_F_T, subject = gen_T, type = "local", 
                                    substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
         
         r_R <- as.character(reverseComplement(DNAString(r)))
         r_R_T <- chartr("C", "T", r_R)
-        aln_R <- .panda_pairwiseAlignment(pattern = r_R_T, subject = gen_T, type = "local", 
+        aln_R <- pairwiseAlignment(pattern = r_R_T, subject = gen_T, type = "local", 
                                    substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
         
         if (score(aln_F) >= score(aln_R)) {
@@ -81,9 +71,7 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
         aln_template <- strsplit(aln_pat_converted, "")[[1]]
         
         reconstructed <- character(length(aln_template))
-        ## pairwiseAlignment(type="local") may start inside the raw read;
-        ## preserve the original read coordinate when restoring C/T states.
-        raw_idx <- start(pattern(best_aln))
+        raw_idx <- 1
         for(j in seq_along(aln_template)) {
           if(aln_template[j] == "-") reconstructed[j] <- "-"
           else {
@@ -151,11 +139,11 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
     read_name <- names(reads_set)[i]
     
     read_F <- raw_read_seq; read_F_T <- chartr("C", "T", read_F)
-    aln_F <- .panda_pairwiseAlignment(pattern = read_F_T, subject = genome_T, type = "local", 
+    aln_F <- pairwiseAlignment(pattern = read_F_T, subject = genome_T, type = "local", 
                                substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
     
     read_R <- reverseComplement(raw_read_seq); read_R_T <- chartr("C", "T", read_R)
-    aln_R <- .panda_pairwiseAlignment(pattern = read_R_T, subject = genome_T, type = "local", 
+    aln_R <- pairwiseAlignment(pattern = read_R_T, subject = genome_T, type = "local", 
                                substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
     
     if (score(aln_F) >= score(aln_R)) {
@@ -169,8 +157,7 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
     aln_template <- strsplit(aln_pat_converted, "")[[1]]
     
     reconstructed_pat_chars <- character(length(aln_template))
-    ## Do not assume that a local alignment starts at raw-read position 1.
-    raw_idx <- start(pattern(best_aln))
+    raw_idx <- 1
     
     for(j in seq_along(aln_template)) {
       if(aln_template[j] == "-") {
@@ -299,178 +286,67 @@ process_ab1_files <- function(file_paths, file_names, trim_start = 20, trim_end 
   return(seq_list)
 }
 
-## Read one FASTA/FASTQ file while preserving multi-line FASTA records and
-## validating the four-line FASTQ structure. Returned sequences are uppercase.
-.panda_read_sequences <- function(filepath, filename, format = c("fastq", "fasta")) {
-  format <- match.arg(format)
-  if (is.na(filepath) || is.na(filename) || !file.exists(filepath)) return(character())
-  con <- if (grepl("\\.gz$", filename, ignore.case = TRUE)) gzfile(filepath, "rt") else file(filepath, "rt")
-  on.exit(close(con), add = TRUE)
-  lines <- readLines(con, warn = FALSE)
-  if (!length(lines)) return(character())
-  if (format == "fastq") {
-    if (length(lines) %% 4L != 0L || any(!startsWith(lines[seq(1L, length(lines), by = 4L)], "@")))
-      stop("Invalid FASTQ structure: expected 4 lines per record.")
-    seqs <- lines[seq(2L, length(lines), by = 4L)]
-    quals <- lines[seq(4L, length(lines), by = 4L)]
-    if (any(nchar(seqs) != nchar(quals))) stop("FASTQ sequence/quality length mismatch.")
-  } else {
-    hdr <- which(startsWith(lines, ">"))
-    if (!length(hdr)) stop("FASTA file contains no header.")
-    ends <- c(hdr[-1L] - 1L, length(lines))
-    seqs <- vapply(seq_along(hdr), function(ii) {
-      x <- lines[(hdr[ii] + 1L):ends[ii]]
-      paste0(x[!startsWith(x, ">")], collapse = "")
-    }, character(1))
-  }
-  seqs <- toupper(gsub("\\s+", "", seqs))
-  if (any(!grepl("^[ACGTN]+$", seqs))) stop("Sequence contains unsupported bases.")
-  seqs[nzchar(seqs)]
-}
-
-.panda_expand_dereplicated <- function(counts, top_n = Inf, paired = FALSE) {
-  if (!length(counts)) return(DNAStringSet())
-  counts <- head(sort(counts, decreasing = TRUE), top_n)
-  if (!paired) {
-    out <- DNAStringSet(names(counts))
-    names(out) <- paste0("Rank", seq_along(counts), "_Count", as.integer(counts))
-    return(out)
-  }
-  seqs <- character(); ids <- character()
-  for (ii in seq_along(counts)) {
-    parts <- strsplit(names(counts)[ii], "---PAIR---", fixed = TRUE)[[1L]]
-    base <- paste0("Rank", ii, "_Count", as.integer(counts[ii]))
-    seqs <- c(seqs, parts[1L], parts[2L])
-    ids <- c(ids, paste0(base, "_R1"), paste0(base, "_R2"))
-  }
-  out <- DNAStringSet(seqs); names(out) <- ids; out
-}
-
-.panda_finalize_ngs_result <- function(res, is_unmerged = FALSE) {
-  if (is.null(res)) return(NULL)
-  if (is_unmerged) {
-    res$read_summary <- res$read_summary %>%
-      mutate(BaseID = sub("_R[12]$", "", ReadID)) %>%
-      group_by(BaseID) %>%
-      summarise(
-        Strand = paste(unique(Strand), collapse = "/"),
-        Mismatches = sum(Mismatches), Gaps = sum(Gaps),
-        Identity_Pct = mean(Identity_Pct), Meth_Pct = mean(Meth_Pct, na.rm = TRUE),
-        Conv_Pct = mean(Conv_Pct), CpG_Count = sum(CpG_Count),
-        Pattern = if (any(grepl("excluded", Pattern))) "excluded (Pair Failed QC)" else "Passed",
-        .groups = "drop"
-      ) %>% rename(ReadID = BaseID)
-    res$long_data <- res$long_data %>% mutate(ReadID = sub("_R[12]$", "", ReadID))
-    excluded_ids <- res$read_summary$ReadID[grepl("excluded", res$read_summary$Pattern)]
-    res$long_data <- res$long_data %>% filter(!ReadID %in% excluded_ids)
-    res$counts$total <- res$counts$total / 2
-  }
-  res$long_data <- res$long_data %>%
-    mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")),
-           Count = replace_na(Count, 1L))
-  res$read_summary <- res$read_summary %>%
-    mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")),
-           Count = replace_na(Count, 1L))
-  res
-}
-
-calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
-                                    min_window_coverage = 1L) {
+calculate_heterogeneity <- function(res_obj) {
   df_long <- res_obj$long_data
   cpg_sites <- res_obj$genome_info$cpg_pos
-  empty_scores <- data.frame(
-    Metric = c("Amplicon PDR", "Window Epipolymorphism", "Amplicon qFDRP"),
-    Value = c(0, 0, 0)
-  )
-  if (is.null(df_long) || nrow(df_long) == 0 || length(cpg_sites) == 0)
-    return(list(scores = empty_scores, meth_mat = matrix(NA),
-                clusters = NULL, pdr_by_cpg = data.frame(),
-                epipolymorphism_by_window = data.frame(),
-                qfdrp_by_cpg = data.frame()))
-
-  ## One row per dereplicated molecule and an explicit abundance column.
-  ## Sanger rows have Count=1; NGS rows retain their dereplication count.
-  if (!"Count" %in% names(df_long)) df_long$Count <- 1L
-  df_long$Count[is.na(df_long$Count) | df_long$Count < 1] <- 1L
-  molecule_counts <- df_long %>%
-    distinct(ReadID, Count) %>%
-    group_by(ReadID) %>% summarise(Count = max(Count), .groups = "drop")
-  meth_mat <- df_long %>%
-    select(ReadID, Position, Methylation) %>%
-    distinct(ReadID, Position, .keep_all = TRUE) %>%
-    pivot_wider(names_from = Position, values_from = Methylation) %>%
+  
+  if(is.null(df_long) || nrow(df_long) == 0) {
+    return(list(scores = data.frame(Metric = c("PDR (Discordance)", "Epipolymorphism", "qFDRP"), Value = c(0, 0, 0)), meth_mat = matrix(NA), clusters = NULL))
+  }
+  
+  meth_mat <- df_long %>% 
+    select(ReadID, Position, Methylation) %>% 
+    distinct(ReadID, Position, .keep_all = TRUE) %>% 
+    pivot_wider(names_from = Position, values_from = Methylation) %>% 
     column_to_rownames("ReadID")
+  
   miss <- setdiff(as.character(cpg_sites), colnames(meth_mat))
-  if (length(miss) > 0) for (cc in miss) meth_mat[[cc]] <- NA_real_
-  meth_mat <- meth_mat[, as.character(cpg_sites), drop = FALSE]
-  molecule_counts <- molecule_counts[match(rownames(meth_mat), molecule_counts$ReadID), ]
-  molecule_counts$Count[is.na(molecule_counts$Count)] <- 1L
-  weights <- molecule_counts$Count
-
-  ## Amplicon-level PDR: the same discordance concept as the reference,
-  ## aggregated over molecules that contain at least four observed CpGs.
-  observed_n <- rowSums(!is.na(meth_mat))
-  discordant <- apply(meth_mat, 1, function(x) {
-    x <- x[!is.na(x)]
-    length(x) >= 4L && length(unique(x)) > 1L
-  })
-  eligible <- observed_n >= 4L
-  pdr_score <- if (any(eligible))
-    100 * sum(weights[eligible] * discordant[eligible]) / sum(weights[eligible]) else 0
-
-  ## Epipolymorphism is calculated independently for each consecutive
-  ## four-CpG window, then summarized across windows. Counts are weighted.
-  epi_rows <- list()
-  if (length(cpg_sites) >= 4L) {
-    for (ww in seq_len(length(cpg_sites) - 3L)) {
-      x <- meth_mat[, ww:(ww + 3L), drop = FALSE]
-      keep <- complete.cases(x)
-      if (sum(weights[keep]) < min_window_coverage || !any(keep)) next
-      patterns <- apply(x[keep, , drop = FALSE], 1, paste0, collapse = "")
-      tab <- tapply(weights[keep], patterns, sum)
-      pk <- tab / sum(tab)
-      epi_rows[[length(epi_rows) + 1L]] <- data.frame(
-        Window = ww, Start_CpG = cpg_sites[ww], End_CpG = cpg_sites[ww + 3L],
-        Coverage = sum(weights[keep]), Epipolymorphism = 1 - sum(pk^2)
-      )
+  if(length(miss) > 0) for(c in miss) meth_mat[[c]] <- NA
+  meth_mat <- meth_mat[, as.character(cpg_sites), drop=FALSE] 
+  
+  calc_pdr <- function(row) { vals <- na.omit(row); if(length(vals) < 4) return(NA); return(as.integer(length(unique(vals)) > 1)) }
+  pdr_score <- mean(apply(meth_mat, 1, calc_pdr), na.rm=TRUE) * 100
+  if(is.nan(pdr_score)) pdr_score <- 0
+  
+  epialleles <- character()
+  if(length(cpg_sites) >= 4) {
+    for(i in 1:(length(cpg_sites)-3)) {
+      window_mat <- meth_mat[, i:(i+3), drop=FALSE]
+      patterns <- apply(window_mat, 1, function(x) { if(any(is.na(x))) return(NA); paste(x, collapse="") })
+      epialleles <- c(epialleles, na.omit(patterns))
     }
   }
-  epi_df <- if (length(epi_rows)) bind_rows(epi_rows) else data.frame()
-  epipoly_score <- if (nrow(epi_df)) mean(epi_df$Epipolymorphism) else 0
-
-  ## Amplicon qFDRP: abundance-weighted normalized Hamming distances
-  ## over the CpGs shared by each pair of dereplicated molecules. This is
-  ## intentionally region-level for long-range amplicon phasing.
-  n <- nrow(meth_mat); q_sum <- 0; q_den <- 0
-  if (n > 1L) for (ii in seq_len(n - 1L)) for (jj in (ii + 1L):n) {
-    valid <- !is.na(meth_mat[ii, ]) & !is.na(meth_mat[jj, ])
-    n_shared <- sum(valid)
-    if (n_shared >= min_shared_cpg) {
-      d <- sum(meth_mat[ii, valid] != meth_mat[jj, valid]) / n_shared
-      mult <- weights[ii] * weights[jj]
-      q_sum <- q_sum + d * mult
-      q_den <- q_den + mult
+  if(length(epialleles) > 0) { probs <- table(epialleles)/length(epialleles); epipoly <- 1 - sum(probs^2)
+  } else { epipoly <- 0 }
+  
+  cluster_mat <- meth_mat; cluster_mat[is.na(cluster_mat)] <- 0.5
+  asm_cluster <- rep(1, nrow(cluster_mat))
+  if(nrow(cluster_mat) >= 2) {
+    try({ 
+      set.seed(11) # Fixed seed for deterministic clustering
+      asm_cluster <- kmeans(cluster_mat, centers = 2)$cluster 
+    }, silent=TRUE)
+  }
+  
+  used_mat <- meth_mat
+  if(nrow(used_mat) > 100) {
+    set.seed(11) # Fixed seed for deterministic subsampling
+    used_mat <- used_mat[sample(nrow(used_mat), 100), ] 
+  }
+  qfdrp_sum <- 0; n_pairs <- 0; reads <- rownames(used_mat)
+  
+  if(length(reads) > 1) {
+    for(i in 1:(length(reads)-1)) {
+      for(j in (i+1):length(reads)) {
+        r1 <- used_mat[i, ]; r2 <- used_mat[j, ]
+        valid <- !is.na(r1) & !is.na(r2); n_ov <- sum(valid)
+        if(n_ov > 0) { qfdrp_sum <- qfdrp_sum + (sum(r1[valid]!=r2[valid])/n_ov); n_pairs <- n_pairs + 1 }
+      }
     }
   }
-  qfdrp_score <- if (q_den > 0) q_sum / q_den else 0
-
-  ## Optional per-CpG PDR/qFDRP tables for QC and auditability.
-  pdr_by_cpg <- lapply(seq_along(cpg_sites), function(cc) {
-    keep <- !is.na(meth_mat[, cc]) & eligible
-    vals <- meth_mat[keep, , drop = FALSE]
-    disc <- if (nrow(vals)) apply(vals, 1, function(x) {
-      x <- x[!is.na(x)]; length(x) >= 4L && length(unique(x)) > 1L
-    }) else logical()
-    data.frame(Position = cpg_sites[cc], Coverage = sum(weights[keep]),
-               PDR = if (any(keep)) sum(weights[keep] * disc) / sum(weights[keep]) else NA_real_)
-  }) %>% bind_rows()
-  list(
-    scores = data.frame(Metric = c("Amplicon PDR", "Window Epipolymorphism", "Amplicon qFDRP"),
-                        Value = c(pdr_score, epipoly_score, qfdrp_score)),
-    meth_mat = meth_mat, clusters = NULL,
-    pdr_by_cpg = pdr_by_cpg, epipolymorphism_by_window = epi_df,
-    qfdrp_by_cpg = data.frame()
-  )
+  qfdrp_score <- if(n_pairs > 0) (qfdrp_sum / n_pairs) else 0
+  
+  list(scores = data.frame(Metric = c("PDR (Discordance)", "Epipolymorphism", "qFDRP"), Value = c(pdr_score, epipoly, qfdrp_score)), meth_mat = meth_mat, clusters = asm_cluster)
 }
 
 calculate_quma_stats <- function(res_obj, mode = "Sanger") {
@@ -519,43 +395,13 @@ analyze_group_comparison <- function(res_list_A, res_list_B, genome_seq, g1_name
     left_join(site_B, by="Position") %>% rename(Meth_2=Meth, Total_2=Total, Pct_2=Pct) %>%
     replace_na(list(Meth_1=0, Total_1=0, Pct_1=0, Meth_2=0, Total_2=0, Pct_2=0))
   
-  ## Pooled molecule-level Fisher tests are retained as a fallback and audit
-  ## field. When each group has >=2 samples, the displayed site p-values use
-  ## sample-level methylation percentages to avoid treating reads as biological
-  ## replicates (pseudo-replication).
-  sample_site <- function(res_list, group_name) {
-    bind_rows(lapply(names(res_list), function(nm) {
-      rr <- if (!is.null(res_list[[nm]]$metrics)) res_list[[nm]]$metrics else res_list[[nm]]
-      dd <- rr$long_data
-      if (is.null(dd) || !nrow(dd)) return(NULL)
-      if (!"Count" %in% names(dd)) dd$Count <- 1L
-      dd %>% group_by(Position) %>%
-        summarise(Pct = sum(Methylation * Count) / sum(Count) * 100,
-                  .groups = "drop") %>% mutate(SampleID = nm, Group = group_name)
-    }))
-  }
-  sample_A <- sample_site(res_list_A, g1_name)
-  sample_B <- sample_site(res_list_B, g2_name)
   p_vals <- numeric(nrow(full_site_table))
-  pooled_p_vals <- numeric(nrow(full_site_table))
-  replicate_p_vals <- rep(NA_real_, nrow(full_site_table))
   for(i in 1:nrow(full_site_table)) {
     m1 <- full_site_table$Meth_1[i]; u1 <- full_site_table$Total_1[i] - m1
     m2 <- full_site_table$Meth_2[i]; u2 <- full_site_table$Total_2[i] - m2
-    if(full_site_table$Total_1[i] == 0 && full_site_table$Total_2[i] == 0) {
-      pooled_p_vals[i] <- NA_real_
-    } else {
-      mat <- matrix(c(m1, u1, m2, u2), nrow = 2, byrow = TRUE)
-      pooled_p_vals[i] <- fisher.test(mat)$p.value
-    }
-    if (nrow(sample_A) && nrow(sample_B)) {
-      a <- sample_A$Pct[sample_A$Position == cpg_sites[i]]
-      b <- sample_B$Pct[sample_B$Position == cpg_sites[i]]
-      if (sum(is.finite(a)) >= 2L && sum(is.finite(b)) >= 2L)
-        replicate_p_vals[i] <- tryCatch(t.test(a, b)$p.value, error = function(e) NA_real_)
-    }
+    if(full_site_table$Total_1[i] == 0 && full_site_table$Total_2[i] == 0) { p_vals[i] <- NA } 
+    else { mat <- matrix(c(m1, u1, m2, u2), nrow = 2, byrow = TRUE); p_vals[i] <- fisher.test(mat)$p.value }
   }
-  p_vals <- ifelse(is.finite(replicate_p_vals), replicate_p_vals, pooled_p_vals)
   full_site_table$P_Value <- p_vals
   
   # Benjamini-Hochberg FDR correction
@@ -563,43 +409,23 @@ analyze_group_comparison <- function(res_list_A, res_list_B, genome_seq, g1_name
   
   get_read_pcts <- function(res_list) {
     unlist(lapply(res_list, function(r) {
-      rr <- if (!is.null(r$metrics)) r$metrics else r
-      d <- rr$read_summary %>% filter(!str_detect(Pattern, "^excluded"))
+      d <- r$read_summary %>% filter(!str_detect(Pattern, "^excluded"))
       if(nrow(d)==0) return(numeric(0)); return(d$Meth_Pct) 
     }))
   }
   reads_A <- get_read_pcts(res_list_A); reads_B <- get_read_pcts(res_list_B)
-  pooled_u_test_p <- NA
+  u_test_p <- NA
   if(length(reads_A) > 0 && length(reads_B) > 0) {
     reads_A <- na.omit(reads_A); reads_B <- na.omit(reads_B)
     if(length(reads_A) > 0 && length(reads_B) > 0) { 
       u_test <- wilcox.test(reads_A, reads_B, exact=FALSE)
-      pooled_u_test_p <- u_test$p.value 
+      u_test_p <- u_test$p.value 
     }
   }
-  sample_overall <- function(x) {
-    vapply(x, function(r) {
-      rr <- if (!is.null(r$metrics)) r$metrics else r; d <- rr$read_summary
-      d <- d[!grepl("^excluded", d$Pattern) & is.finite(d$Meth_Pct), ]
-      if (!nrow(d)) return(NA_real_)
-      if ("Count" %in% names(d)) weighted.mean(d$Meth_Pct, d$Count) else mean(d$Meth_Pct)
-    }, numeric(1))
-  }
-  oa <- sample_overall(res_list_A); ob <- sample_overall(res_list_B)
-  oa <- oa[is.finite(oa)]; ob <- ob[is.finite(ob)]
-  u_test_p <- if (length(oa) >= 2L && length(ob) >= 2L)
-    tryCatch(wilcox.test(oa, ob, exact = FALSE)$p.value, error = function(e) NA_real_)
-  else pooled_u_test_p
   
   sum_df <- data.frame(Group = c(g1_name, g2_name), Mean = c(mean(site_A$Pct, na.rm=T), mean(site_B$Pct, na.rm=T)))
   
-  return(list(site_table = full_site_table, combined_long = combined_long,
-              u_test_p = u_test_p, pooled_u_test_p = pooled_u_test_p,
-              replicate_p_used = any(is.finite(replicate_p_vals)),
-              sample_summary = data.frame(Group = c(g1_name, g2_name),
-                                          N = c(length(oa), length(ob)),
-                                          Mean = c(mean(oa), mean(ob))),
-              summary = sum_df, g1_name=g1_name, g2_name=g2_name))
+  return(list(site_table = full_site_table, combined_long = combined_long, u_test_p = u_test_p, summary = sum_df, g1_name=g1_name, g2_name=g2_name))
 }
 
 # ==============================================================================
@@ -784,7 +610,7 @@ ui <- page_navbar(
             card(
               h3("PANDA: Phased ANalysis of DNA Amplicons"),
               p(
-                em("A unified platform for read-level phased bisulfite analysis of targeted amplicons (Sanger & NGS)"),
+                em("A unified platform for Phased Bisulfite Analysis and Heterogeneity Quantification (Sanger & NGS)"),
                 br(), 
                 "The source code, demo data, and detailed documentation are publicly available on ",
                 a("https://github.com/kubo-azu/PANDA", 
@@ -792,16 +618,6 @@ ui <- page_navbar(
                   target = "_blank"),
                 "."
               ),
-              
-              div(class="alert alert-success",
-                  h4(icon("shield-halved"), " Data Privacy & Security Statement"),
-                  p(style="font-size: 0.95em;",
-                    "All uploaded sequence data is processed in a secure, isolated temporary environment. ",
-                    "To ensure absolute data privacy and compliance with human data policies, this application is explicitly programmed to ",
-                    strong("automatically and permanently delete all uploaded files and intermediate data immediately upon user session termination"),
-                    " or when the 'Clear/Reset' buttons are used. We do not permanently store, log, or track any user data on our servers.")
-              ),
-              # ----------------------------------------------------------------------
               
               div(class="alert alert-info",
                   h4(icon("flask"), " Quick Start with Demo Data"),
@@ -934,7 +750,7 @@ ui <- page_navbar(
                                             h6("Detailed analysis for clonal sequences."),
                                             tags$ul(
                                               tags$li(strong("Lollipop Plot:"), " Visualizes methylation status. CpG sites are displayed sequentially (equally spaced) for clear pattern recognition. (Y-axis shows clone names)."),
-                                              tags$li(strong("Heterogeneity & ASM:"), " Contains the ASM heatmap and amplicon-level heterogeneity scores."),
+                                              tags$li(strong("Heterogeneity & ASM:"), " Contains the 'ASM Heatmap' (clustering) and heterogeneity scores (PDR, qFDRP)."),
                                               tags$li(strong("Sequence Info & Alignments:"), " Quality control metrics and pairwise text alignments to check mismatches directly on the sequence.")
                                             ),
                                             hr(),
@@ -945,7 +761,7 @@ ui <- page_navbar(
                                               tags$li(strong("Top Sequences (Lollipop):"), " Shows the most abundant unique alleles. CpG sites are ", strong("equally spaced (QUMA-style)"), " for high visibility, combined with a bar chart of read counts. Ideal for presentations."),
                                               tags$li(strong("ASM Profile (Main):"),
                                                       tags$ul(
-                                                        tags$li(strong("Heterogeneity & Distribution:"), " Amplicon PDR, window Epipolymorphism, amplicon qFDRP, and a histogram to check bimodality."),
+                                                        tags$li(strong("Heterogeneity & Distribution:"), " Advanced metrics (PDR, Epipoly) and a histogram to check bimodality."),
                                                         tags$li(strong("Abundance Heatmap (Weighted):"), " Visualizes allele proportions. Unlike the Lollipop plot, the X-axis reflects the ", strong("actual genomic distance (bp)"), ", allowing you to assess physical read coverage and drop-outs.")
                                                       )
                                               ),
@@ -954,24 +770,24 @@ ui <- page_navbar(
                                             hr(),
                                             
                                             h5(icon("scale-balanced"), "3. Group Comparison"),
-                                            p("Statistical comparison (Difference Plot, sample-level comparison, and pooled molecule-level Fisher's Exact as an audit fallback) between two groups across Sanger or NGS batches. When at least two samples are available per group, sample-level tests are used to avoid treating sequencing molecules as biological replicates. ", 
+                                            p("Statistical comparison (Difference Plot, Mann-Whitney U, Fisher's Exact) between two biological groups across Sanger or NGS batches. ", 
                                               strong("P-values for single-CpG comparisons are adjusted for multiple testing using the Benjamini-Hochberg (FDR) method."))
                                   ),
                                   
                                   nav_panel("Heterogeneity Metrics",
-                                            p("PANDA reports abundance-weighted, amplicon-adapted heterogeneity metrics based on Scherer et al. (Nucleic Acids Research, 2020). Sanger clones have Count = 1; dereplicated NGS molecules retain their read counts."),
+                                            p("PANDA calculates advanced metrics to quantify disorder in methylation patterns (based on Scherer et al., Nucleic Acids Res, 2020)."),
                                             hr(),
                                             
-                                            h5(strong("Amplicon PDR (Proportion of Discordant Reads):")),
-                                            p("The abundance-weighted percentage of molecules containing at least four observed CpGs and both methylated and unmethylated states. It summarizes within-molecule discordance across the target amplicon."),
+                                            h5(strong("PDR (Proportion of Discordant Reads):")),
+                                            p("The percentage of reads that are locally discordant (i.e., contain both methylated and unmethylated CpGs). High PDR indicates stochastic or disordered methylation turnover."),
                                             hr(),
                                             
-                                            h5(strong("Window Epipolymorphism:")),
-                                            p("Calculated independently for each consecutive four-CpG window using abundance-weighted epiallele frequencies, then summarized across eligible windows. High values indicate diverse local methylation patterns."),
+                                            h5(strong("Epipolymorphism:")),
+                                            p("Calculated based on the probability of observing specific epialleles (patterns of 4 consecutive CpGs). High values indicate a diverse population of methylation patterns."),
                                             hr(),
                                             
-                                            h5(strong("Amplicon qFDRP:")),
-                                            p("Measures the abundance-weighted normalized Hamming distance between molecule pairs over CpGs observed in both molecules. It is an amplicon-level adaptation for long-range phased patterns; a high value indicates diverse molecule-level methylation states.")
+                                            h5(strong("qFDRP (quantitative Fraction of Discordant Read Pairs):")),
+                                            p("Measures the dissimilarity between randomly chosen pairs of reads. A high qFDRP indicates that the population contains diverse methylation states (high heterogeneity) rather than a uniform pattern.")
                                   )
                                 )
                 ),
@@ -981,7 +797,7 @@ ui <- page_navbar(
                                 h6("1. Alignment & Quality Control"),
                                 p("PANDA processes data completely within R, eliminating the need for external aligners."),
                                 tags$ul(
-                                  tags$li(strong("Alignment Strategy:"), " Employs ", strong("Local Pairwise Alignment"), " (Smith-Waterman via ", code("pwalign"), " when available, with a Biostrings fallback) on ", em("in silico"), " C-to-T converted sequences. ",
+                                  tags$li(strong("Alignment Strategy:"), " Employs ", strong("Local Pairwise Alignment"), " (Smith-Waterman algorithm via the ", code("Biostrings"), " package) on ", em("in silico"), " C-to-T converted sequences. ",
                                           "Highly stringent scoring parameters ", strong("(match = 1, mismatch = -3, gap opening = -10, gap extension = -4)"), 
                                           " are applied to prevent artefactual gapping and ensure exact positional coordinate mapping of CpG sites."),
                                   tags$li(strong("Biological Quality Filtering:"), " To seamlessly integrate both NGS and Sanger data, PANDA ", strong("does not use Phred base quality scores"), " for filtering. Instead, reads are strictly filtered by:",
@@ -1179,27 +995,6 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
   
-  # [SECURITY UPDATE] ----------------------------------------------------------
-  # Track the path of temporary files uploaded on the server side and ensure they are deleted
-  session_temp_files <- reactiveVal(character())
-  
-  # アップロードされたファイルをリストに登録するヘルパー関数
-  register_temp_files <- function(paths) {
-    valid_paths <- paths[!is.na(paths) & paths != ""]
-    if(length(valid_paths) > 0) {
-      session_temp_files(unique(c(session_temp_files(), valid_paths)))
-    }
-  }
-  
-  # A hook that physically and immediately discards temporary files when the user closes a tab (ends session)
-  session$onSessionEnded(function() {
-    files_to_delete <- session_temp_files()
-    if(length(files_to_delete) > 0) {
-      unlink(files_to_delete, force = TRUE)
-    }
-  })
-  # ----------------------------------------------------------------------------
-  
   output$dl_demo_data <- downloadHandler(
     filename = function() { "PANDA_Demo.zip" },
     content = function(file) {
@@ -1223,17 +1018,11 @@ server <- function(input, output, session) {
   ))
   
   observeEvent(input$sanger_multi_files, {
-    new_df <- input$sanger_multi_files
-    register_temp_files(new_df$datapath) # [SECURITY UPDATE] Register the file path
-    old_df <- stored_sanger()
-    stored_sanger(bind_rows(old_df, new_df))
+    new_df <- input$sanger_multi_files; old_df <- stored_sanger(); stored_sanger(bind_rows(old_df, new_df))
   })
   
   # Clear Sanger Files
   observeEvent(input$clear_sanger_files, { 
-    # [SECURITY UPDATE] When the Clear button is pressed, the registered files are physically deleted
-    unlink(stored_sanger()$datapath, force = TRUE)
-    
     shinyjs::reset("sanger_multi_files")
     stored_sanger(data.frame()) 
     sanger_multi_batch(NULL)
@@ -1244,7 +1033,6 @@ server <- function(input, output, session) {
   observeEvent(input$ngs_files_merged, {
     new_df <- input$ngs_files_merged
     if(!is.null(new_df)) {
-      register_temp_files(new_df$datapath) # [SECURITY UPDATE] Register the file path
       new_df$datapath_R2 <- NA
       new_df$orig_name_R1 <- new_df$name
       new_df$orig_name_R2 <- NA
@@ -1257,8 +1045,6 @@ server <- function(input, output, session) {
   observeEvent(input$ngs_files_unmerged, {
     new_files <- input$ngs_files_unmerged
     if(is.null(new_files)) return()
-    
-    register_temp_files(new_files$datapath) # [SECURITY UPDATE] Register the file path
     
     processed_files <- new_files %>%
       mutate(
@@ -1319,9 +1105,6 @@ server <- function(input, output, session) {
   
   # Clear NGS Files
   observeEvent(input$clear_ngs_files, { 
-    # [SECURITY UPDATE] When the Clear button is pressed, the registered files are physically deleted
-    unlink(c(stored_ngs()$datapath, stored_ngs()$datapath_R2), force = TRUE)
-    
     shinyjs::reset("ngs_files_merged")
     shinyjs::reset("ngs_files_unmerged")
     stored_ngs(data.frame(
@@ -1343,10 +1126,7 @@ server <- function(input, output, session) {
   sanger_genomes_list <- reactiveVal(NULL)
   observeEvent(input$sanger_genome, {
     if (!is.null(input$sanger_genome)) {
-      register_temp_files(input$sanger_genome$datapath) # [SECURITY UPDATE]
       sanger_genomes_list(readDNAStringSet(input$sanger_genome$datapath))
-      # [SECURITY UPDATE] Files can be deleted immediately after being loaded into memory
-      unlink(input$sanger_genome$datapath, force = TRUE) 
     }
   })
   
@@ -1367,9 +1147,6 @@ server <- function(input, output, session) {
   
   # Reset Sanger
   observeEvent(input$reset_sanger, { 
-    # [SECURITY UPDATE] Files are physically deleted during reset
-    unlink(stored_sanger()$datapath, force = TRUE)
-    
     shinyjs::reset("sanger_sidebar_inputs")
     stored_sanger(data.frame())
     sanger_single_res(NULL)
@@ -1387,11 +1164,9 @@ server <- function(input, output, session) {
         genome <- get_sanger_target_seq(); incProgress(0.3, detail = "Reading...")
         if(input$sanger_single_fmt=="fasta") { 
           req(input$sanger_single_fasta); 
-          register_temp_files(input$sanger_single_fasta$datapath) # [SECURITY UPDATE]
           reads <- readDNAStringSet(input$sanger_single_fasta$datapath) 
         } else { 
           req(input$sanger_single_ab1); 
-          register_temp_files(input$sanger_single_ab1$datapath) # [SECURITY UPDATE]
           reads <- process_ab1_files(input$sanger_single_ab1$datapath, input$sanger_single_ab1$name, input$ab1_trim_start, input$ab1_trim_end) 
         }
         incProgress(0.6, detail = "Aligning..."); res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE) 
@@ -1421,9 +1196,7 @@ server <- function(input, output, session) {
     target_motifs <- character()
     if (!is.null(input$sanger_motif_file)) {
       tryCatch({
-        register_temp_files(input$sanger_motif_file$datapath) # [SECURITY UPDATE]
         target_motifs <- c(target_motifs, readLines(input$sanger_motif_file$datapath))
-        unlink(input$sanger_motif_file$datapath, force = TRUE) # メモリ展開後に即時削除
       }, error = function(e) showNotification("Error reading motif file", type="warning"))
     }
     if (input$sanger_motif_text != "") {
@@ -1538,9 +1311,7 @@ server <- function(input, output, session) {
   ngs_genomes_list <- reactiveVal(NULL)
   observeEvent(input$ngs_genome, {
     if (!is.null(input$ngs_genome)) {
-      register_temp_files(input$ngs_genome$datapath) # [SECURITY UPDATE]
       ngs_genomes_list(readDNAStringSet(input$ngs_genome$datapath))
-      unlink(input$ngs_genome$datapath, force = TRUE) # メモリ展開後に即時削除
     }
   })
   
@@ -1554,9 +1325,6 @@ server <- function(input, output, session) {
   
   # Reset NGS
   observeEvent(input$reset_ngs, { 
-    # [SECURITY UPDATE] リセット時にもファイルを物理的に削除
-    unlink(c(stored_ngs()$datapath, stored_ngs()$datapath_R2), force = TRUE)
-    
     shinyjs::reset("ngs_sidebar_inputs")
     stored_ngs(data.frame(
       name = character(), 
@@ -1583,9 +1351,7 @@ server <- function(input, output, session) {
     target_motifs <- character()
     if (!is.null(input$ngs_motif_file)) {
       tryCatch({
-        register_temp_files(input$ngs_motif_file$datapath) # [SECURITY UPDATE]
         target_motifs <- c(target_motifs, readLines(input$ngs_motif_file$datapath))
-        unlink(input$ngs_motif_file$datapath, force = TRUE) # メモリ展開後に即時削除
       }, error = function(e) showNotification("Error reading motif file", type="warning"))
     }
     if (input$ngs_motif_text != "") {
@@ -1602,16 +1368,24 @@ server <- function(input, output, session) {
         incProgress(1/n, detail = files$name[i])
         
         tryCatch({
-          reads_char <- .panda_read_sequences(
-            files$datapath[i], files$orig_name_R1[i], input$ngs_type
-          )
+          read_seqs <- function(fp, orig_name) {
+            if (is.na(fp) || is.na(orig_name)) return(character())
+            con <- if (grepl("\\.gz$", orig_name, ignore.case = TRUE)) gzfile(fp, "rt") else file(fp, "rt")
+            lines <- readLines(con)
+            close(con)
+            
+            if (input$ngs_type == "fastq") {
+              if(length(lines) >= 2) return(lines[seq(2, length(lines), by = 4)]) else return(character())
+            } else {
+              return(lines[!grepl("^>", lines)])
+            }
+          }
+          
+          reads_char <- read_seqs(files$datapath[i], files$orig_name_R1[i])
           is_unmerged_paired <- (input$ngs_read_mode == "unmerged" && !is.na(files$datapath_R2[i]))
-          all_reads_set <- DNAStringSet()
           
           if (is_unmerged_paired) {
-            reads_char_r2 <- .panda_read_sequences(
-              files$datapath_R2[i], files$orig_name_R2[i], input$ngs_type
-            )
+            reads_char_r2 <- read_seqs(files$datapath_R2[i], files$orig_name_R2[i])
             min_len <- min(length(reads_char), length(reads_char_r2))
             
             if (min_len > 0) {
@@ -1632,7 +1406,6 @@ server <- function(input, output, session) {
               
               if (length(paired_seqs) > 0) {
                 counts <- sort(table(paired_seqs), decreasing = TRUE)
-                all_reads_set <- .panda_expand_dereplicated(counts, paired = TRUE)
                 top_seqs <- head(counts, input$ngs_top_n)
                 
                 expanded_names <- character()
@@ -1652,18 +1425,14 @@ server <- function(input, output, session) {
                 reads_set <- DNAStringSet(expanded_seqs)
                 names(reads_set) <- expanded_names
               } else {
-                all_reads_set <- DNAStringSet()
                 reads_set <- DNAStringSet()
               }
             } else {
-              all_reads_set <- DNAStringSet()
               reads_set <- DNAStringSet()
             }
           } else {
             if (!is.na(files$datapath_R2[i])) {
-              reads_char_r2 <- .panda_read_sequences(
-                files$datapath_R2[i], files$orig_name_R2[i], input$ngs_type
-              )
+              reads_char_r2 <- read_seqs(files$datapath_R2[i], files$orig_name_R2[i])
               r2_set <- DNAStringSet(reads_char_r2)
               r2_rc <- as.character(reverseComplement(r2_set))
               reads_char <- c(reads_char, r2_rc) 
@@ -1678,10 +1447,11 @@ server <- function(input, output, session) {
             
             if (length(reads_char) > 0) {
               counts <- sort(table(reads_char), decreasing = TRUE)
-              all_reads_set <- .panda_expand_dereplicated(counts)
-              reads_set <- .panda_expand_dereplicated(counts, input$ngs_top_n)
+              top_seqs <- head(counts, input$ngs_top_n)
+              
+              reads_set <- DNAStringSet(names(top_seqs))
+              names(reads_set) <- paste0("Rank", 1:length(top_seqs), "_Count", as.integer(top_seqs))
             } else {
-              all_reads_set <- DNAStringSet()
               reads_set <- DNAStringSet()
             }
           }
@@ -1721,28 +1491,14 @@ server <- function(input, output, session) {
               
               res$long_data <- res$long_data %>% mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")))
               res$read_summary <- res$read_summary %>% mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")))
-
-              ## Top N is retained for plots and downloadable alignments only.
-              ## Quantitative heterogeneity and methylation summaries use all
-              ## dereplicated sequences that pass the same biological QC.
-              metrics_res <- res
-              if (length(all_reads_set) > length(reads_set)) {
-                full_res <- run_bisulfite_alignment(
-                  target_genome, all_reads_set, input$ngs_ident,
-                  input$ngs_conv, return_alignments = FALSE
-                )
-                metrics_res <- .panda_finalize_ngs_result(full_res, is_unmerged_paired)
-              }
-              if (is.null(metrics_res)) metrics_res <- res
               
               nm <- files$name[i]
-              res$metrics <- metrics_res
               res_list[[nm]] <- res
-              het_list[[nm]] <- calculate_heterogeneity(metrics_res)
-              stats <- calculate_quma_stats(metrics_res, "NGS")
+              het_list[[nm]] <- calculate_heterogeneity(res)
+              stats <- calculate_quma_stats(res, "NGS")
               
-              real_total_reads <- sum(metrics_res$read_summary$Count)
-              real_used_reads <- sum(metrics_res$read_summary$Count[metrics_res$read_summary$Pattern == "Passed" | !grepl("^excluded", metrics_res$read_summary$Pattern)])
+              real_total_reads <- sum(res$read_summary$Count)
+              real_used_reads <- sum(res$read_summary$Count[res$read_summary$Pattern == "Passed" | !grepl("^excluded", res$read_summary$Pattern)])
               
               sum_list[[length(sum_list)+1]] <- data.frame(
                 Sample=nm, 
