@@ -4,3 +4,8 @@
 .Ruserdata
 .DS_Store
 rsconnect/
+
+# Local analysis outputs and runtime logs
+results/
+panda_shiny.log
+*.log

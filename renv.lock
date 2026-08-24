@@ -5,6 +5,26 @@
       {
         "Name": "CRAN",
         "URL": "https://cran.rstudio.com"
+      },
+      {
+        "Name": "BioCsoft",
+        "URL": "https://bioconductor.org/packages/3.23/bioc"
+      },
+      {
+        "Name": "BioCann",
+        "URL": "https://bioconductor.org/packages/3.23/data/annotation"
+      },
+      {
+        "Name": "BioCexp",
+        "URL": "https://bioconductor.org/packages/3.23/data/experiment"
+      },
+      {
+        "Name": "BioCworkflows",
+        "URL": "https://bioconductor.org/packages/3.23/workflows"
+      },
+      {
+        "Name": "BioCbooks",
+        "URL": "https://bioconductor.org/packages/3.23/books"
       }
     ]
   },
@@ -841,6 +861,44 @@
       "NeedsCompilation": "no",
       "Author": "Constantin Ahlmann-Eltze [aut] (ORCID: <https://orcid.org/0000-0002-3762-068X>), Peter Hickey [aut, cre] (ORCID: <https://orcid.org/0000-0002-8153-6258>), Hervé Pagès [aut]",
       "Maintainer": "Peter Hickey <peter.hickey@gmail.com>"
+    },
+    "PANDAcore": {
+      "Package": "PANDAcore",
+      "Version": "1.0.0",
+      "Source": "Local",
+      "Type": "Package",
+      "Title": "Core Analysis Engine for PANDA",
+      "Authors@R": "person(\"PANDA\", \"Developers\", role = c(\"aut\", \"cre\"), email = \"panda@example.org\")",
+      "Description": "Shared analysis functions for the PANDA graphical and command-line interfaces. The package is intended for reproducible analysis of Sanger and amplicon sequencing data, including sequence alignment, methylation profiling, and heterogeneity analysis.",
+      "License": "MIT + file LICENSE",
+      "Encoding": "UTF-8",
+      "Roxygen": "list(markdown = TRUE)",
+      "RoxygenNote": "7.3.2",
+      "Depends": [
+        "R (>= 4.2.0)"
+      ],
+      "Imports": [
+        "Biostrings",
+        "dplyr",
+        "jsonlite",
+        "magrittr",
+        "pwalign",
+        "sangerseqR",
+        "stats",
+        "stringr",
+        "tibble",
+        "tidyr",
+        "utils"
+      ],
+      "Suggests": [
+        "testthat (>= 3.0.0)",
+        "yaml"
+      ],
+      "Config/testthat/edition": "3",
+      "Author": "PANDA Developers [aut, cre]",
+      "Maintainer": "PANDA Developers <panda@example.org>",
+      "RemoteType": "local",
+      "RemoteUrl": "./PANDAcore"
     },
     "R6": {
       "Package": "R6",

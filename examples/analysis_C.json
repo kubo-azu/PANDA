@@ -1,0 +1,23 @@
+{
+  "mode": "ngs",
+  "input": "PANDA_Demo/NGS/FASTQ/ExpC_Group",
+  "reference": "PANDA_Demo/NGS/Reference/NGS_Ref_Targets.fasta",
+  "reference_target": "mm10_Nanog_Promoter",
+  "output": "results/demo_C_group",
+  "min_identity": 90,
+  "min_conversion": 95,
+  "min_count": 1,
+  "workers": 8,
+  "groups": {
+    "WT": [
+      "NGS_Nanog_WT_Rep1",
+      "NGS_Nanog_WT_Rep2",
+      "NGS_Nanog_WT_Rep3"
+    ],
+    "KO": [
+      "NGS_Nanog_KO_Rep1",
+      "NGS_Nanog_KO_Rep2",
+      "NGS_Nanog_KO_Rep3"
+    ]
+  }
+}

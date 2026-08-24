@@ -1,0 +1,19 @@
+{
+  "mode": "ngs",
+  "input": "PANDA_Demo/NGS/FASTQ/ExpB_Phasing",
+  "reference": "PANDA_Demo/NGS/Reference/NGS_Ref_Targets.fasta",
+  "reference_target": "mm10_H19_DMR",
+  "output": "results/demo_B_motif_A",
+  "motif_file": "examples/motifs/expB_haplotype_A.txt",
+  "min_identity": 90,
+  "min_conversion": 95,
+  "min_count": 1,
+  "workers": 8,
+  "groups": {
+    "Haplotype A (unmethylated)": [
+      "NGS_H19_Hetero_Phased_Rep1",
+      "NGS_H19_Hetero_Phased_Rep2",
+      "NGS_H19_Hetero_Phased_Rep3"
+    ]
+  }
+}

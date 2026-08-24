@@ -1,0 +1,23 @@
+{
+  "mode": "ngs",
+  "input": "PANDA_Demo/NGS/FASTA/ExpA_ASM",
+  "reference": "PANDA_Demo/NGS/Reference/NGS_Ref_Targets.fasta",
+  "reference_target": "mm10_H19_DMR",
+  "output": "results/full_cli",
+  "min_identity": 90,
+  "min_conversion": 95,
+  "workers": 8,
+  "min_count": 1,
+  "groups": {
+    "ASM (Normal)": [
+      "NGS_H19_Normal_Rep1",
+      "NGS_H19_Normal_Rep2",
+      "NGS_H19_Normal_Rep3"
+    ],
+    "LOI": [
+      "NGS_H19_LOI_Rep1",
+      "NGS_H19_LOI_Rep2",
+      "NGS_H19_LOI_Rep3"
+    ]
+  }
+}

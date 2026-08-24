@@ -1,8 +1,10 @@
 Package: PANDAcore
 Type: Package
 Title: Core Analysis Engine for PANDA
-Version: 0.1.0
+Version: 1.0.0
 Authors@R: person("PANDA", "Developers", role = c("aut", "cre"), email = "panda@example.org")
+Author: PANDA Developers [aut, cre]
+Maintainer: PANDA Developers <panda@example.org>
 Description: Shared analysis functions for the PANDA graphical and command-line
     interfaces. The package is intended for reproducible analysis of Sanger and
     amplicon sequencing data, including sequence alignment, methylation
@@ -15,8 +17,16 @@ Depends:
     R (>= 4.2.0)
 Imports:
     Biostrings,
+    dplyr,
+    jsonlite,
+    magrittr,
+    methods,
     pwalign,
+    sangerseqR,
     stats,
+    stringr,
+    tibble,
+    tidyr,
     utils
 Suggests:
     testthat (>= 3.0.0),

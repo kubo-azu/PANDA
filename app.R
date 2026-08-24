@@ -7,14 +7,34 @@ library(bslib)
 library(patchwork)
 library(sangerseqR)
 
-# Bioconductor 3.19+ provides pairwise alignment helpers through pwalign.
-# Keep the single-file app compatible with older Biostrings installations.
-.panda_has_pwalign <- requireNamespace("pwalign", quietly = TRUE)
+# Bioconductor provides pairwise alignment helpers through pwalign.  It is a
+# required dependency for the current app; the deprecated Biostrings alignment
+# fallback is intentionally not used.
+if (!requireNamespace("pwalign", quietly = TRUE)) {
+  stop("Package 'pwalign' is required. Install it through the project environment.")
+}
+.panda_has_pwalign <- TRUE
+.panda_alignment_cache <- new.env(parent = emptyenv())
+.panda_alignment_cache_limit <- 10000L
 .panda_pairwiseAlignment <- function(...) {
-  if (.panda_has_pwalign) pwalign::pairwiseAlignment(...) else Biostrings::pairwiseAlignment(...)
+  args <- list(...)
+  pattern_key <- as.character(args$pattern)
+  subject_key <- as.character(args$subject)
+  type_key <- if (is.null(args$type)) "" else as.character(args$type)
+  gap_open_key <- if (is.null(args$gapOpening)) "" else as.character(args$gapOpening)
+  gap_ext_key <- if (is.null(args$gapExtension)) "" else as.character(args$gapExtension)
+  key <- paste(type_key, gap_open_key, gap_ext_key, pattern_key, subject_key, sep = "\r")
+  if (exists(key, envir = .panda_alignment_cache, inherits = FALSE)) {
+    return(get(key, envir = .panda_alignment_cache, inherits = FALSE))
+  }
+  aln <- do.call(pwalign::pairwiseAlignment, args)
+  if (length(ls(envir = .panda_alignment_cache)) < .panda_alignment_cache_limit) {
+    assign(key, aln, envir = .panda_alignment_cache)
+  }
+  aln
 }
 .panda_nucleotideSubstitutionMatrix <- function(...) {
-  if (.panda_has_pwalign) pwalign::nucleotideSubstitutionMatrix(...) else Biostrings::nucleotideSubstitutionMatrix(...)
+  pwalign::nucleotideSubstitutionMatrix(...)
 }
 
 # ==============================================================================
@@ -23,6 +43,13 @@ library(sangerseqR)
 # Maximum 300MB for large NGS FASTQ files
 options(shiny.maxRequestSize = 300 * 1024^2)
 
+# Optional NGS parallelism. The alignment algorithm and results are unchanged;
+# workers only distribute independent representative alignments. Users can
+# override this in the GUI or with PANDA_WORKERS before launching the app.
+.panda_default_workers <- max(1L, min(8L, parallel::detectCores(logical = FALSE)))
+.panda_workers <- suppressWarnings(as.integer(Sys.getenv("PANDA_WORKERS", as.character(.panda_default_workers))))
+if (is.na(.panda_workers) || .panda_workers < 1L) .panda_workers <- 1L
+
 # ==============================================================================
 # 1. CORE LOGIC (Backend Functions)
 # ==============================================================================
@@ -30,7 +57,8 @@ options(shiny.maxRequestSize = 300 * 1024^2)
 run_bisulfite_alignment <- function(genome_seq, reads_set, 
                                     min_identity = 90, 
                                     min_conversion = 95,
-                                    return_alignments = TRUE) {
+                                    return_alignments = TRUE,
+                                    workers = 1L) {
   
   if (is(genome_seq, "DNAStringSet")) genome_seq <- genome_seq[[1]]
   genome_seq <- DNAString(as.character(genome_seq))
@@ -62,13 +90,13 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
         r <- as.character(test_reads[[i]])
         
         r_F <- r; r_F_T <- chartr("C", "T", r_F)
-        aln_F <- .panda_pairwiseAlignment(pattern = r_F_T, subject = gen_T, type = "local", 
-                                   substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
+        aln_F <- .panda_pairwiseAlignment(pattern = r_F_T, subject = gen_T, type = "global", 
+                                          substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
         
         r_R <- as.character(reverseComplement(DNAString(r)))
         r_R_T <- chartr("C", "T", r_R)
-        aln_R <- .panda_pairwiseAlignment(pattern = r_R_T, subject = gen_T, type = "local", 
-                                   substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
+        aln_R <- .panda_pairwiseAlignment(pattern = r_R_T, subject = gen_T, type = "global", 
+                                          substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
         
         if (score(aln_F) >= score(aln_R)) {
           best_aln <- aln_F; final_r <- r_F
@@ -81,8 +109,7 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
         aln_template <- strsplit(aln_pat_converted, "")[[1]]
         
         reconstructed <- character(length(aln_template))
-        ## pairwiseAlignment(type="local") may start inside the raw read;
-        ## preserve the original read coordinate when restoring C/T states.
+        ## Preserve the original read coordinate when restoring C/T states.
         raw_idx <- start(pattern(best_aln))
         for(j in seq_along(aln_template)) {
           if(aln_template[j] == "-") reconstructed[j] <- "-"
@@ -144,19 +171,57 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
   n_total_reads <- length(reads_set)
   n_excluded <- 0 
   
+  workers <- suppressWarnings(as.integer(workers))
+  if (is.na(workers) || workers < 1L) workers <- 1L
+  if (workers > 1L && .Platform$OS.type == "windows") {
+    message("  Windows detected: using serial alignment for portability.")
+    workers <- 1L
+  }
+  
+  align_one_read <- function(i) {
+    raw_read_seq <- reads_set[[i]]
+    read_F <- raw_read_seq
+    read_F_T <- chartr("C", "T", read_F)
+    aln_F <- .panda_pairwiseAlignment(
+      pattern = read_F_T, subject = genome_T, type = "global",
+      substitutionMatrix = sub_mat, gapOpening = gap_op,
+      gapExtension = gap_ext
+    )
+    read_R <- reverseComplement(raw_read_seq)
+    read_R_T <- chartr("C", "T", read_R)
+    aln_R <- .panda_pairwiseAlignment(
+      pattern = read_R_T, subject = genome_T, type = "global",
+      substitutionMatrix = sub_mat, gapOpening = gap_op,
+      gapExtension = gap_ext
+    )
+    list(read_F = read_F, read_R = read_R, aln_F = aln_F, aln_R = aln_R)
+  }
+  
+  alignment_pairs <- if (workers > 1L && n_total_reads > 1L) {
+    message("  Parallel alignment: ", n_total_reads,
+            " representatives on ", workers, " workers")
+    parallel::mclapply(
+      seq_len(n_total_reads), align_one_read,
+      mc.cores = workers, mc.preschedule = TRUE
+    )
+  } else {
+    lapply(seq_len(n_total_reads), align_one_read)
+  }
+  
   for (i in seq_len(n_total_reads)) {
+    if (i == 1L || i %% 100L == 0L || i == n_total_reads) {
+      message("  Aligning representative ", i, "/", n_total_reads)
+    }
     if (i %% 500 == 0) gc()
     
-    raw_read_seq <- reads_set[[i]]
+    alignment_pair <- alignment_pairs[[i]]
+    raw_read_seq <- alignment_pair$read_F
     read_name <- names(reads_set)[i]
     
-    read_F <- raw_read_seq; read_F_T <- chartr("C", "T", read_F)
-    aln_F <- .panda_pairwiseAlignment(pattern = read_F_T, subject = genome_T, type = "local", 
-                               substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
-    
-    read_R <- reverseComplement(raw_read_seq); read_R_T <- chartr("C", "T", read_R)
-    aln_R <- .panda_pairwiseAlignment(pattern = read_R_T, subject = genome_T, type = "local", 
-                               substitutionMatrix = sub_mat, gapOpening = gap_op, gapExtension = gap_ext)
+    read_F <- alignment_pair$read_F
+    read_R <- alignment_pair$read_R
+    aln_F <- alignment_pair$aln_F
+    aln_R <- alignment_pair$aln_R
     
     if (score(aln_F) >= score(aln_R)) {
       best_aln <- aln_F; final_read_seq <- read_F; strand <- "Forward"
@@ -169,7 +234,7 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
     aln_template <- strsplit(aln_pat_converted, "")[[1]]
     
     reconstructed_pat_chars <- character(length(aln_template))
-    ## Do not assume that a local alignment starts at raw-read position 1.
+    ## Preserve the raw-read coordinate when restoring C/T states.
     raw_idx <- start(pattern(best_aln))
     
     for(j in seq_along(aln_template)) {
@@ -209,7 +274,9 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
       if (s_char != "-") curr_g_pos <- curr_g_pos + 1
       if (s_char == "-" || p_char == "-") next
       
-      orig_g_base <- as.character(subseq(genome_seq_char, curr_g_pos, curr_g_pos))
+      ## genome_seq_char is a single character string; use substring() for
+      ## one-based genomic coordinates (subseq() treats it as length 1).
+      orig_g_base <- substring(genome_seq_char, curr_g_pos, curr_g_pos)
       
       if (orig_g_base == "C") {
         if (curr_g_pos %in% cpg_sites) {
@@ -374,8 +441,45 @@ process_ab1_files <- function(file_paths, file_names, trim_start = 20, trim_end 
   res
 }
 
+.panda_weighted_qfdrp <- function(meth_mat, weights, min_shared_cpg = 1L) {
+  n <- nrow(meth_mat)
+  if (n < 2L) return(0)
+  weights <- as.numeric(weights)
+  weights[is.na(weights) | weights < 1] <- 1
+  masks <- apply(!is.na(meth_mat), 1L, paste0, collapse = "")
+  groups <- split(seq_len(n), masks)
+  q_sum <- 0; q_den <- 0
+  for (aa in seq_along(groups)) {
+    ia <- groups[[aa]]; xa <- meth_mat[ia, , drop = FALSE]; wa <- weights[ia]
+    shared_self <- !is.na(meth_mat[ia[[1L]], ]); k_self <- sum(shared_self)
+    if (k_self >= min_shared_cpg && length(ia) > 1L) {
+      total_a <- sum(wa)
+      meth_a <- colSums(xa[, shared_self, drop = FALSE] * wa)
+      q_sum <- q_sum + sum(meth_a * (total_a - meth_a)) / k_self
+      q_den <- q_den + (total_a^2 - sum(wa^2)) / 2
+    }
+    if (aa == length(groups)) next
+    for (bb in (aa + 1L):length(groups)) {
+      ib <- groups[[bb]]; xb <- meth_mat[ib, , drop = FALSE]; wb <- weights[ib]
+      shared <- !is.na(meth_mat[ia[[1L]], ]) & !is.na(meth_mat[ib[[1L]], ])
+      k_shared <- sum(shared)
+      if (k_shared < min_shared_cpg) next
+      total_a <- sum(wa); total_b <- sum(wb)
+      meth_a <- colSums(xa[, shared, drop = FALSE] * wa)
+      meth_b <- colSums(xb[, shared, drop = FALSE] * wb)
+      q_sum <- q_sum + sum(meth_a * (total_b - meth_b) +
+                             (total_a - meth_a) * meth_b) / k_shared
+      q_den <- q_den + total_a * total_b
+    }
+  }
+  if (q_den > 0) q_sum / q_den else 0
+}
+
 calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
-                                    min_window_coverage = 1L) {
+                                    min_window_coverage = 1L,
+                                    cluster_method = "kmeans",
+                                    k = 2L,
+                                    seed = 11L) {
   df_long <- res_obj$long_data
   cpg_sites <- res_obj$genome_info$cpg_pos
   empty_scores <- data.frame(
@@ -387,7 +491,7 @@ calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
                 clusters = NULL, pdr_by_cpg = data.frame(),
                 epipolymorphism_by_window = data.frame(),
                 qfdrp_by_cpg = data.frame()))
-
+  
   ## One row per dereplicated molecule and an explicit abundance column.
   ## Sanger rows have Count=1; NGS rows retain their dereplication count.
   if (!"Count" %in% names(df_long)) df_long$Count <- 1L
@@ -406,7 +510,7 @@ calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
   molecule_counts <- molecule_counts[match(rownames(meth_mat), molecule_counts$ReadID), ]
   molecule_counts$Count[is.na(molecule_counts$Count)] <- 1L
   weights <- molecule_counts$Count
-
+  
   ## Amplicon-level PDR: the same discordance concept as the reference,
   ## aggregated over molecules that contain at least four observed CpGs.
   observed_n <- rowSums(!is.na(meth_mat))
@@ -417,7 +521,7 @@ calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
   eligible <- observed_n >= 4L
   pdr_score <- if (any(eligible))
     100 * sum(weights[eligible] * discordant[eligible]) / sum(weights[eligible]) else 0
-
+  
   ## Epipolymorphism is calculated independently for each consecutive
   ## four-CpG window, then summarized across windows. Counts are weighted.
   epi_rows <- list()
@@ -437,23 +541,39 @@ calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
   }
   epi_df <- if (length(epi_rows)) bind_rows(epi_rows) else data.frame()
   epipoly_score <- if (nrow(epi_df)) mean(epi_df$Epipolymorphism) else 0
-
+  
   ## Amplicon qFDRP: abundance-weighted normalized Hamming distances
   ## over the CpGs shared by each pair of dereplicated molecules. This is
   ## intentionally region-level for long-range amplicon phasing.
-  n <- nrow(meth_mat); q_sum <- 0; q_den <- 0
-  if (n > 1L) for (ii in seq_len(n - 1L)) for (jj in (ii + 1L):n) {
-    valid <- !is.na(meth_mat[ii, ]) & !is.na(meth_mat[jj, ])
-    n_shared <- sum(valid)
-    if (n_shared >= min_shared_cpg) {
-      d <- sum(meth_mat[ii, valid] != meth_mat[jj, valid]) / n_shared
-      mult <- weights[ii] * weights[jj]
-      q_sum <- q_sum + d * mult
-      q_den <- q_den + mult
+  qfdrp_score <- .panda_weighted_qfdrp(
+    meth_mat, weights, min_shared_cpg = min_shared_cpg
+  )
+
+  ## Clustering is used only to order the ASM heatmap; it does not alter the
+  ## three heterogeneity metrics. Missing CpGs are column-mean imputed solely
+  ## for this visualization step.
+  clusters <- NULL
+  cluster_method <- tolower(as.character(cluster_method[[1L]]))
+  k <- suppressWarnings(as.integer(k[[1L]])); if (is.na(k) || k < 2L) k <- 2L
+  seed <- suppressWarnings(as.integer(seed[[1L]])); if (is.na(seed)) seed <- 11L
+  if (identical(cluster_method, "kmeans") && nrow(meth_mat) >= k) {
+    cluster_mat <- meth_mat
+    for (jj in seq_len(ncol(cluster_mat))) {
+      vv <- cluster_mat[, jj]; mu <- mean(vv, na.rm = TRUE)
+      if (!is.finite(mu)) mu <- 0.5
+      vv[is.na(vv)] <- mu; cluster_mat[, jj] <- vv
+    }
+    if (nrow(unique(cluster_mat)) >= k) {
+      had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
+      if (had_seed) old_seed <- get(".Random.seed", envir = .GlobalEnv)
+      set.seed(seed)
+      km <- stats::kmeans(cluster_mat, centers = k, nstart = 10L)
+      if (had_seed) assign(".Random.seed", old_seed, envir = .GlobalEnv)
+      else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
+      clusters <- stats::setNames(as.integer(km$cluster), rownames(meth_mat))
     }
   }
-  qfdrp_score <- if (q_den > 0) q_sum / q_den else 0
-
+  
   ## Optional per-CpG PDR/qFDRP tables for QC and auditability.
   pdr_by_cpg <- lapply(seq_along(cpg_sites), function(cc) {
     keep <- !is.na(meth_mat[, cc]) & eligible
@@ -467,7 +587,7 @@ calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
   list(
     scores = data.frame(Metric = c("Amplicon PDR", "Window Epipolymorphism", "Amplicon qFDRP"),
                         Value = c(pdr_score, epipoly_score, qfdrp_score)),
-    meth_mat = meth_mat, clusters = NULL,
+    meth_mat = meth_mat, clusters = clusters,
     pdr_by_cpg = pdr_by_cpg, epipolymorphism_by_window = epi_df,
     qfdrp_by_cpg = data.frame()
   )
@@ -479,9 +599,19 @@ calculate_quma_stats <- function(res_obj, mode = "Sanger") {
   if(nrow(df_summary) == 0) return(list(overall=0, sd_cpg=0, se_cpg=0, sd_seq=0, se_seq=0, cpg_table=data.frame()))
   
   if (mode == "NGS") {
-    df_long <- df_long %>% mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")))
-    overall_meth <- sum(df_long$Methylation * df_long$Count) / sum(df_long$Count) * 100
-    cpg_stats <- df_long %>% group_by(Position) %>% summarise(Num_Meth=sum(Methylation*Count), Num_Total=sum(Count), Meth_Pct=sum(Methylation*Count)/sum(Count)*100)
+    parsed_count <- suppressWarnings(as.integer(str_extract(
+      df_long$ReadID, "(?<=Count)\\d+"
+    )))
+    parsed_count[is.na(parsed_count) | parsed_count < 1L] <- 1L
+    df_long <- df_long %>% mutate(Count = parsed_count)
+    overall_meth <- sum(df_long$Methylation * df_long$Count, na.rm = TRUE) /
+      sum(df_long$Count, na.rm = TRUE) * 100
+    cpg_stats <- df_long %>% group_by(Position) %>% summarise(
+      Num_Meth = sum(Methylation * Count, na.rm = TRUE),
+      Num_Total = sum(Count, na.rm = TRUE),
+      Meth_Pct = Num_Meth / Num_Total * 100,
+      .groups = "drop"
+    )
   } else {
     overall_meth <- mean(df_long$Methylation) * 100
     cpg_stats <- df_long %>% group_by(Position) %>% summarise(Num_Meth=sum(Methylation), Num_Total=n(), Meth_Pct=mean(Methylation)*100)
@@ -591,7 +721,12 @@ analyze_group_comparison <- function(res_list_A, res_list_B, genome_seq, g1_name
     tryCatch(wilcox.test(oa, ob, exact = FALSE)$p.value, error = function(e) NA_real_)
   else pooled_u_test_p
   
-  sum_df <- data.frame(Group = c(g1_name, g2_name), Mean = c(mean(site_A$Pct, na.rm=T), mean(site_B$Pct, na.rm=T)))
+  sum_df <- data.frame(
+    Group = c(g1_name, g2_name),
+    Mean = c(mean(site_A$Pct, na.rm=T), mean(site_B$Pct, na.rm=T)),
+    SD = c(sd(oa, na.rm = TRUE), sd(ob, na.rm = TRUE))
+  )
+  sum_df$SD[!is.finite(sum_df$SD)] <- 0
   
   return(list(site_table = full_site_table, combined_long = combined_long,
               u_test_p = u_test_p, pooled_u_test_p = pooled_u_test_p,
@@ -631,44 +766,55 @@ create_meth_histogram <- function(long_data) {
 create_abundance_heatmap <- function(long_data) {
   if(is.null(long_data) || nrow(long_data) == 0) return(NULL)
   
-  df_summary <- long_data %>%
-    group_by(ReadID) %>%
-    summarise(
-      Mean_Meth = mean(Methylation, na.rm = TRUE),
-      Count = if(any(grepl("Count", ReadID))) as.integer(str_extract(first(ReadID), "(?<=Count)\\d+")) else 1
-    ) %>%
-    arrange(desc(Mean_Meth)) %>%
-    mutate(
-      ymax = cumsum(Count),
-      ymin = lag(ymax, default = 0)
+  ## Display overview: group retained epialleles by their mean methylation
+  ## range.  All reads remain in the analysis; only the visualisation is
+  ## aggregated.
+  if (!"Count" %in% names(long_data)) {
+    long_data$Count <- ifelse(
+      grepl("Count", long_data$ReadID),
+      as.integer(stringr::str_extract(long_data$ReadID, "(?<=Count)\\d+")),
+      1L
     )
+  }
+  long_data$Count[is.na(long_data$Count) | long_data$Count < 1] <- 1L
+  heat_order <- long_data %>%
+    group_by(ReadID) %>%
+    summarise(Mean_Meth = mean(Methylation, na.rm = TRUE),
+              Count = first(Count), .groups = "drop") %>%
+    arrange(Mean_Meth, desc(Count), ReadID) %>%
+    mutate(ymax = cumsum(Count), ymin = lag(ymax, default = 0)) %>%
+    select(ReadID, Count, Mean_Meth, ymin, ymax)
+  heat_data <- long_data %>%
+    select(ReadID, Position, Methylation) %>%
+    left_join(heat_order, by = "ReadID")
+  heat_data$Position <- as.numeric(as.character(heat_data$Position))
+  cpg_positions <- sort(unique(heat_data$Position[is.finite(heat_data$Position)]))
+  x_width <- if (length(cpg_positions) > 1L) min(5, 0.8 * min(diff(cpg_positions))) else 5
   
-  plot_data <- long_data %>%
-    inner_join(df_summary, by = "ReadID")
-  
-  ggplot(plot_data) +
-    geom_rect(aes(xmin = Position - 2.5, xmax = Position + 2.5, 
-                  ymin = ymin, ymax = ymax, 
-                  fill = factor(Methylation)), color = NA) +
-    scale_fill_manual(values = c("0" = "lightblue", "1" = "firebrick"), 
-                      labels = c("Unmethylated", "Methylated"), 
+  p_heat <- ggplot(heat_data) +
+    geom_rect(aes(xmin = Position - x_width / 2, xmax = Position + x_width / 2,
+                  ymin = ymin, ymax = ymax, fill = factor(Methylation)), color = NA) +
+    scale_fill_manual(values = c("0" = "lightblue", "1" = "firebrick"),
+                      breaks = c("1", "0"), labels = c("Methylated", "Unmethylated"),
                       name = "Status") +
     scale_y_continuous(expand = c(0, 0)) +
-    scale_x_continuous(expand = c(0, 0)) +
-    theme_minimal() +
+    theme_minimal(base_size = 18) +
+    theme(panel.background = element_rect(fill = "grey92", colour = NA),
+          panel.grid.major = element_line(colour = "white", linewidth = 0.35),
+          panel.grid.minor = element_blank(), axis.text = element_text(size = 14),
+          axis.title = element_text(size = 16), axis.title.y = element_blank(),
+          axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
     labs(
-      title = "Abundance Heatmap (Weighted by Read Count)",
-      subtitle = "Vertical thickness of each segment represents allele read count. X-axis shows physical distance.",
-      x = "CpG Position (bp)",
-      y = "Cumulative Read Count"
+      title = "Abundance heatmap (all retained variants)",
+      subtitle = "Band thickness is proportional to read Count; rows ordered by mean methylation",
+      x = "CpG Position (bp)", y = "Cumulative read count"
     ) +
-    theme(
-      text = element_text(size=14),
-      panel.grid = element_blank()
-    )
+    scale_x_continuous(breaks = seq_along(cpg_positions), labels = cpg_positions,
+                       expand = c(0, 0))
+  p_heat
 }
 
-create_lollipop_plot <- function(long_data, point_size = 4, text_size = 14) {
+create_lollipop_plot <- function(long_data, point_size = 4, text_size = 14, top_n = 30L) {
   if(is.null(long_data) || nrow(long_data) == 0) return(NULL)
   
   df <- long_data %>%
@@ -680,7 +826,18 @@ create_lollipop_plot <- function(long_data, point_size = 4, text_size = 14) {
       Mean_Meth = mean(Methylation, na.rm = TRUE),
       Count = if(any(grepl("Count", ReadID))) as.integer(str_extract(first(ReadID), "(?<=Count)\\d+")) else 1
     ) %>%
-    arrange(desc(Mean_Meth), desc(Count)) 
+    arrange(desc(Count), desc(Mean_Meth), ReadID) %>%
+    mutate(Count_Rank = row_number())
+  
+  top_n <- max(1L, as.integer(top_n))
+  ## Select objectively by abundance; methylation order is applied only to
+  ## the selected rows for readability.
+  keep_ids <- read_stats %>%
+    arrange(desc(Count), desc(Mean_Meth), ReadID) %>%
+    slice_head(n = top_n) %>% pull(ReadID) %>% as.character()
+  df <- df %>% filter(ReadID %in% keep_ids)
+  read_stats <- read_stats %>% filter(ReadID %in% keep_ids) %>%
+    arrange(Mean_Meth, desc(Count), ReadID)
   
   unique_ids <- read_stats$ReadID
   df$ReadID <- factor(df$ReadID, levels = unique_ids)
@@ -700,20 +857,22 @@ create_lollipop_plot <- function(long_data, point_size = 4, text_size = 14) {
     theme(
       text = element_text(size=text_size), 
       legend.position = "none",
-      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8)
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 12)
     ) +
-    labs(x = "CpG Position (Sequential)", y = if(is_sanger) "Clones / Reads" else "Alleles (Sorted by Meth%)")
+    labs(x = "CpG Position (Sequential)", y = if(is_sanger) "Clones / Reads" else "Alleles (methylation state order)")
   
   if (!is_sanger) {
     p1 <- p1 + theme(axis.text.y = element_blank())
     p2 <- ggplot(read_stats, aes(x = Count, y = ReadID)) +
       geom_col(fill = "steelblue") +
-      geom_text(aes(label = Count), hjust = -0.1, size = 3) +
-      theme_void() + 
-      theme(plot.margin = margin(l = 10, r = 20)) +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.3))) +
+      geom_text(aes(label = paste0("#", Count_Rank, " (n=", Count, ")")),
+                hjust = -0.1, size = 3.9) +
+      theme_void(base_size = 13) + 
+      theme(plot.margin = margin(l = 10, r = 45, t = 10, b = 10)) +
+      coord_cartesian(clip = "off") +
+      scale_x_continuous(expand = expansion(mult = c(0, 0.65))) +
       labs(title = "Read Count")
-    return(p1 + p2 + plot_layout(widths = c(3, 1)))
+    return(p1 + p2 + plot_layout(widths = c(3, 1.15)))
   } else {
     return(p1)
   }
@@ -749,11 +908,29 @@ create_asm_heatmap <- function(het_res) {
 
 create_comp_barplot <- function(summary_df) {
   if(is.null(summary_df) || nrow(summary_df)==0) return(NULL)
-  ggplot(summary_df, aes(x=Group, y=Mean, fill=Group)) + 
-    geom_bar(stat="identity", width=0.6, show.legend = FALSE) + 
-    ylim(0,100) + 
-    theme_minimal() +
-    labs(y = "Mean Methylation (%)", title = "Global Methylation Difference")
+  if (!"SD" %in% names(summary_df)) summary_df$SD <- 0
+  group_levels <- unique(as.character(summary_df$Group))
+  palette_values <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7")
+  group_cols <- setNames(rep(palette_values, length.out = length(group_levels)), group_levels)
+  ggplot(summary_df, aes(x = Group, y = Mean, fill = Group)) +
+    geom_col(width = 0.62, show.legend = FALSE) +
+    geom_errorbar(aes(ymin = pmax(0, Mean - SD), ymax = pmin(100, Mean + SD)),
+                  width = 0.14, linewidth = 0.5) +
+    geom_text(aes(label = formatC(Mean, format = "fg", digits = 3)),
+              vjust = -0.45, size = 4) +
+    scale_fill_manual(values = group_cols, drop = FALSE) +
+    scale_y_continuous(breaks = seq(0, 100, 20),
+                       expand = expansion(mult = c(0, 0.08))) +
+    coord_cartesian(ylim = c(0, 100), clip = "off") +
+    theme_minimal(base_size = 15) +
+    theme(legend.position = "none",
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          axis.title = element_text(size = 14),
+          plot.margin = margin(12, 12, 18, 12)) +
+    labs(y = "Mean methylation (%)", x = NULL,
+         title = "Global methylation comparison")
 }
 
 create_diff_plot <- function(site_table, g1_name="Group 1", g2_name="Group 2") {
@@ -783,23 +960,58 @@ ui <- page_navbar(
   nav_panel(title = "Introduction",
             card(
               h3("PANDA: Phased ANalysis of DNA Amplicons"),
+              span(class = "badge bg-primary", "Version 1.0.0"),
               p(
                 em("A unified platform for read-level phased bisulfite analysis of targeted amplicons (Sanger & NGS)"),
                 br(), 
-                "The source code, demo data, and detailed documentation are publicly available on ",
+                "PANDA preserves methylation patterns at the individual clone or molecule level, rather than reducing an amplicon to only a per-CpG average. The source code, demo data, and detailed documentation are publicly available on ",
                 a("https://github.com/kubo-azu/PANDA", 
                   href = "https://github.com/kubo-azu/PANDA", 
                   target = "_blank"),
                 "."
               ),
+              p(
+                strong("Citation: "),
+                "Kubota, A., Kobayashi, H., & Tajima, A. (2026). PANDA: Read-Level Phased Analysis of DNA Amplicons for Methylation Studies. ",
+                em("bioRxiv"), ". ",
+                a("https://doi.org/10.64898/2026.04.01.715790",
+                  href = "https://doi.org/10.64898/2026.04.01.715790",
+                  target = "_blank")
+              ),
+
+              div(class = "row g-3 mb-3",
+                  div(class = "col-md-4",
+                      div(class = "card h-100 border-primary",
+                          div(class = "card-body",
+                              h5(class = "card-title", icon("dna"), "Sanger"),
+                              p(class = "card-text", "Treats each FASTA record or AB1 base-called sequence as an individual clone. Suitable for phased clonal methylation patterns and small-to-moderate clone sets.")
+                          )
+                      )
+                  ),
+                  div(class = "col-md-4",
+                      div(class = "card h-100 border-success",
+                          div(class = "card-body",
+                              h5(class = "card-title", icon("server"), "Amplicon-NGS"),
+                              p(class = "card-text", "Dereplicates identical reads, retains their original read counts, and uses those counts for abundance-weighted summaries and plots. The default is to use all retained reads.")
+                          )
+                      )
+                  ),
+                  div(class = "col-md-4",
+                      div(class = "card h-100 border-info",
+                          div(class = "card-body",
+                              h5(class = "card-title", icon("chart-line"), "Read-level heterogeneity"),
+                              p(class = "card-text", "Reports Amplicon PDR, Window Epipolymorphism, and Amplicon qFDRP to summarize discordant and diverse methylation states across individual molecules.")
+                          )
+                      )
+                  )
+              ),
               
               div(class="alert alert-success",
-                  h4(icon("shield-halved"), " Data Privacy & Security Statement"),
+                  h4(icon("shield-halved"), " Data Handling & Privacy"),
                   p(style="font-size: 0.95em;",
-                    "All uploaded sequence data is processed in a secure, isolated temporary environment. ",
-                    "To ensure absolute data privacy and compliance with human data policies, this application is explicitly programmed to ",
-                    strong("automatically and permanently delete all uploaded files and intermediate data immediately upon user session termination"),
-                    " or when the 'Clear/Reset' buttons are used. We do not permanently store, log, or track any user data on our servers.")
+                    "Uploaded files are processed in a session-scoped temporary workspace. The application removes uploaded and intermediate files when the session is cleared or terminated, and it does not intentionally retain them as an analysis database. ",
+                    strong("This statement describes the application behavior, not the policies of the service hosting it."),
+                    " For human or otherwise sensitive data, use the local GUI or CLI under your institution's approved storage and retention policy.")
               ),
               # ----------------------------------------------------------------------
               
@@ -811,9 +1023,11 @@ ui <- page_navbar(
               
               h4(icon("layer-group"), " Overview"),
               tags$ul(
-                tags$li(strong("Sanger Mode:"), " Analysis for clonal sequencing (e.g. TA cloning). Supports single-sample detail view and multi-sample group comparison."),
-                tags$li(strong("NGS Mode:"), " Optimized for high-depth amplicon sequencing. Includes automatic dereplication and statistical comparison."),
-                tags$li(strong("Multi-Target & Incremental Upload:"), " Reference supports Multi-FASTA. Files can be accumulated in the queue without resetting.")
+                tags$li(strong("Sanger Mode:"), " Analysis for clonal sequencing (e.g. TA cloning). Each sequence record is an equally weighted clone (Count = 1)."),
+                tags$li(strong("NGS Mode:"), " Optimized for high-depth amplicon sequencing. Identical sequences are dereplicated, while their original read counts are retained as abundance weights."),
+                tags$li(strong("Phased outputs:"), " Lollipop plots show methylation patterns in a visibility-oriented CpG order; abundance heatmaps retain physical CpG coordinates and read-count structure."),
+                tags$li(strong("Multi-Target & Incremental Upload:"), " Reference supports Multi-FASTA. Files can be accumulated in the queue without resetting."),
+                tags$li(strong("Before upload:"), " Trim adapters and primers and perform experiment-specific read QC before analysis. PANDA does not replace a general FASTQ quality-control workflow.")
               ),
               
               h4(icon("list-check"), " How to Use (Step-by-Step)"),
@@ -821,7 +1035,7 @@ ui <- page_navbar(
                 open = "Step 1: Data Preparation",
                 
                 accordion_panel("Step 1: Data Preparation",
-                                p("The quality of analysis depends on a correct Reference Genome."),
+                                p("The quality of analysis depends on a correct reference amplicon sequence."),
                                 div(class="alert alert-warning", icon("triangle-exclamation"), strong(" CRITICAL:"), " Do NOT upload whole genome files (e.g., hg38). Use only amplicon sequences."),
                                 
                                 h6(strong("Method A: Using Primers information (Recommended)")),
@@ -836,7 +1050,7 @@ ui <- page_navbar(
                                 tags$ol(
                                   tags$li("Search for your target gene (e.g., 'Oct4') in UCSC/NCBI and zoom in to your PCR amplicon region."),
                                   tags$li("Include ", strong("30-50bp flanking regions"), " around your primers to ensure correct alignment edges."),
-                                  tags$li("Save as .fasta or .txt. (Multi-FASTA supported).")
+                                  tags$li("Save as FASTA (.fasta/.fa). Multi-FASTA is supported when multiple reference records are needed.")
                                 ),
                                 
                                 hr(),
@@ -981,7 +1195,7 @@ ui <- page_navbar(
                                 h6("1. Alignment & Quality Control"),
                                 p("PANDA processes data completely within R, eliminating the need for external aligners."),
                                 tags$ul(
-                                  tags$li(strong("Alignment Strategy:"), " Employs ", strong("Local Pairwise Alignment"), " (Smith-Waterman via ", code("pwalign"), " when available, with a Biostrings fallback) on ", em("in silico"), " C-to-T converted sequences. ",
+                                  tags$li(strong("Alignment Strategy:"), " Employs ", strong("Global Pairwise Alignment"), " via ", code("pwalign"), " on ", em("in silico"), " C-to-T converted sequences. ",
                                           "Highly stringent scoring parameters ", strong("(match = 1, mismatch = -3, gap opening = -10, gap extension = -4)"), 
                                           " are applied to prevent artefactual gapping and ensure exact positional coordinate mapping of CpG sites."),
                                   tags$li(strong("Biological Quality Filtering:"), " To seamlessly integrate both NGS and Sanger data, PANDA ", strong("does not use Phred base quality scores"), " for filtering. Instead, reads are strictly filtered by:",
@@ -1112,7 +1326,9 @@ ui <- page_navbar(
                     verbatimTextOutput("ngs_file_count_txt"),
                     
                     selectInput("ngs_type", "Type", choices = c("FASTQ (fastq/fq.gz)" = "fastq", "FASTA" = "fasta")),
-                    sliderInput("ngs_top_n", "Top N Alleles", 10, 100, 30),
+                    sliderInput("ngs_top_n", "Top N for lollipop plot", 10, 100, 30),
+                    numericInput("ngs_min_count", "Minimum read count for metrics", value = 1, min = 1, step = 1),
+                    numericInput("ngs_workers", "Alignment workers (parallel)", value = min(.panda_workers, 8L), min = 1, max = 8, step = 1),
                     sliderInput("ngs_conv", "Min Conversion", 0, 100, 95), sliderInput("ngs_ident", "Min Identity", 0, 100, 90),
                     
                     hr(),
@@ -1137,22 +1353,14 @@ ui <- page_navbar(
                 hr(), actionButton("reset_ngs", "Reset All", class="btn-warning w-100", icon=icon("refresh"))
               ),
               navset_card_underline(
-                nav_panel("Batch Summary", plotOutput("ngs_batch_qc_plot", height="400px"), DTOutput("ngs_batch_table")),
+                nav_panel("Batch Summary",
+                          p(class = "text-muted", "Click the plot for a larger view."),
+                          plotOutput("ngs_batch_qc_plot", height="550px", click = "ngs_batch_qc_click"),
+                          DTOutput("ngs_batch_table")),
                 
                 nav_panel("Single Sample Analysis", 
                           uiOutput("ngs_detail_selector"), 
                           navset_card_tab(
-                            nav_panel("ASM Profile", 
-                                      layout_columns(col_widths=c(12, 12),
-                                                     card(card_header("1. Heterogeneity Metrics (PDR, Epipoly, qFDRP)"), DTOutput("ngs_detail_het")),
-                                                     card(card_header("2. Methylation Distribution (Histogram)"), plotOutput("ngs_dist_plot", height="350px")),
-                                                     card(card_header("3. Abundance Heatmap (Weighted)"), plotOutput("ngs_abund_heatmap", height="600px"))
-                                      )
-                            ),
-                            nav_panel("Top Sequences", 
-                                      h5("Top Abundant Alleles (Ranked)"),
-                                      plotOutput("ngs_lollipop_plot", height="550px")
-                            ),
                             nav_panel("Statistics", 
                                       div(style = "overflow-y: auto; max-height: 800px;",
                                           h5("CpG Methylation Rates"), DTOutput("ngs_stats_table"),
@@ -1161,13 +1369,36 @@ ui <- page_navbar(
                                           br(), br()
                                       )
                             ),
+                            nav_panel("Top Sequences", 
+                                      h5("Top Abundant Alleles (Ranked)"),
+                                      p(class = "text-muted", "Scroll to inspect all selected alleles; click the plot for a larger view."),
+                                      div(style = "max-height:700px; overflow:auto;",
+                                          plotOutput("ngs_lollipop_plot", height="900px", click = "ngs_lollipop_click"))
+                            ),
+                            nav_panel("ASM Profile", 
+                                      layout_columns(col_widths=c(12, 12),
+                                                     card(card_header("1. Heterogeneity Metrics (PDR, Epipoly, qFDRP)"), DTOutput("ngs_detail_het")),
+                                                     card(card_header("2. Methylation Distribution (Histogram)"),
+                                                          p(class = "text-muted", "Click the plot for a larger view."),
+                                                          plotOutput("ngs_dist_plot", height="450px", click = "ngs_dist_click")),
+                                                     card(card_header("3. Abundance Heatmap (Weighted)"),
+                                                          p(class = "text-muted", "Scroll to inspect the full plot; click the plot for a larger view."),
+                                                          div(style = "max-height:700px; overflow:auto;",
+                                                              plotOutput("ngs_abund_heatmap", height="1000px", click = "ngs_abund_heatmap_click")))
+                                      )
+                            ),
                             nav_panel("Alignments", 
                                       verbatimTextOutput("ngs_alignments_text")
                             )
                           )
                 ),
                 
-                nav_panel("Group Comparison", h5("Differential Methylation"), layout_columns(col_widths=c(6,6), plotOutput("ngs_comp_diff_plot"), plotOutput("ngs_comp_bar_plot")), hr(), h5("Statistics"), verbatimTextOutput("ngs_comp_stat_txt"), DTOutput("ngs_comp_site_table"))
+                nav_panel("Group Comparison", h5("Differential Methylation"),
+                          p(class = "text-muted", "Click either plot for a larger view."),
+                          layout_columns(col_widths=c(6,6),
+                                         plotOutput("ngs_comp_diff_plot", height="500px", click = "ngs_comp_diff_click"),
+                                         plotOutput("ngs_comp_bar_plot", height="500px", click = "ngs_comp_bar_click")),
+                          hr(), h5("Statistics"), verbatimTextOutput("ngs_comp_stat_txt"), DTOutput("ngs_comp_site_table"))
               )
             )
   )
@@ -1179,21 +1410,36 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
   
+  ## Full-screen, fit-to-viewport modal styling. This deliberately fits the
+  ## complete plot in one view; native CLI dimensions remain available from
+  ## the PDF export when physical-size reproduction is required.
+  modal_fit_css <- tags$style(HTML(
+    ".modal-dialog { max-width: calc(100vw - 20px) !important; width: calc(100vw - 20px) !important; margin: 2vh auto; }
+     .modal-content { max-height: 96vh; box-sizing: border-box; }
+     .modal-body { overflow: hidden !important; padding: 8px; box-sizing: border-box; }
+     .panda-modal-plot { width: 100% !important; max-width: 100% !important; height: 76vh !important; overflow: hidden !important; box-sizing: border-box; }
+     .panda-modal-plot .shiny-plot-output { width: 100% !important; max-width: 100% !important; overflow: hidden !important; }
+     .panda-modal-plot canvas, .panda-modal-plot img { max-width: 100% !important; height: auto !important; }")
+  )
+  
   # [SECURITY UPDATE] ----------------------------------------------------------
   # Track the path of temporary files uploaded on the server side and ensure they are deleted
-  session_temp_files <- reactiveVal(character())
+  ## This is session bookkeeping, not application state.  Keeping it as a
+  ## regular mutable vector avoids reading a reactiveVal from the
+  ## onSessionEnded callback, which has no active reactive context.
+  session_temp_files <- character()
   
   # アップロードされたファイルをリストに登録するヘルパー関数
   register_temp_files <- function(paths) {
     valid_paths <- paths[!is.na(paths) & paths != ""]
     if(length(valid_paths) > 0) {
-      session_temp_files(unique(c(session_temp_files(), valid_paths)))
+      session_temp_files <<- unique(c(session_temp_files, valid_paths))
     }
   }
   
   # A hook that physically and immediately discards temporary files when the user closes a tab (ends session)
   session$onSessionEnded(function() {
-    files_to_delete <- session_temp_files()
+    files_to_delete <- session_temp_files
     if(length(files_to_delete) > 0) {
       unlink(files_to_delete, force = TRUE)
     }
@@ -1206,7 +1452,7 @@ server <- function(input, output, session) {
       if(file.exists("PANDA_Demo.zip")) {
         file.copy("PANDA_Demo.zip", file)
       } else {
-        showNotification("Demo data file not found in directory.", type="error")
+        showNotification("Demo data file not found in directory.", type="error", duration = NULL)
       }
     }
   )
@@ -1399,13 +1645,13 @@ server <- function(input, output, session) {
         
         sanger_single_res(res); sanger_single_het(calculate_heterogeneity(res)); incProgress(1, detail = "Done!")
         
-      }, error = function(e) showNotification(e$message, type="error"))
+      }, error = function(e) showNotification(e$message, type="error", duration = NULL))
     })
   })
   
   output$sanger_summary <- renderPrint({ req(sanger_single_res()); stats <- calculate_quma_stats(sanger_single_res(), "Sanger"); cat(sprintf("Overall Methylation: %.1f%%\n", stats$overall)) })
   output$sanger_plot <- renderPlot({ req(sanger_single_res()); create_lollipop_plot(sanger_single_res()$long_data) })
-
+  
   output$sanger_het_table <- renderDT({ req(sanger_single_het()); datatable(sanger_single_het()$scores, options=list(dom='t'), rownames=FALSE) %>% formatRound(2, 3) })
   
   output$sanger_asm_plot <- renderPlot({ req(sanger_single_het()); create_asm_heatmap(sanger_single_het()) })
@@ -1415,7 +1661,7 @@ server <- function(input, output, session) {
   
   # Run Sanger Multi Batch
   observeEvent(input$run_sanger_multi, {
-    req(get_sanger_target_seq()); files <- stored_sanger(); if(nrow(files)==0) { showNotification("No files selected.", type="error"); return() }
+    req(get_sanger_target_seq()); files <- stored_sanger(); if(nrow(files)==0) { showNotification("No files selected.", type="error", duration = NULL); return() }
     genome <- get_sanger_target_seq(); res_list <- list(); het_list <- list(); sum_list <- list()
     
     target_motifs <- character()
@@ -1431,7 +1677,6 @@ server <- function(input, output, session) {
     }
     target_motifs <- trimws(target_motifs)
     target_motifs <- target_motifs[target_motifs != ""]
-    
     withProgress(message = paste('Batch Analysis:', input$sanger_target_select), value = 0, {
       n <- nrow(files); for(i in 1:n) {
         incProgress(1/n, detail = files$name[i])
@@ -1473,11 +1718,18 @@ server <- function(input, output, session) {
       sanger_multi_batch(list(details=res_list, hets=het_list, summary=bind_rows(sum_list), genome=genome)) 
       if(length(target_motifs) > 0) showNotification(paste("Filtered by", length(target_motifs), "motifs."), type="message")
     } else { 
-      showNotification("No valid results. Check file format or filter criteria.", type="error") 
+      showNotification("No valid results. Check file format or filter criteria.", type="error", duration = NULL) 
     }
   })
   
-  output$sanger_batch_qc <- renderPlot({ req(sanger_multi_batch()); ggplot(sanger_multi_batch()$summary, aes(x=Sample, y=Meth, fill=Sample)) + geom_bar(stat="identity", col="black", show.legend=FALSE) + ylim(0,100) + theme_minimal() })
+  output$sanger_batch_qc <- renderPlot({
+    req(sanger_multi_batch())
+    d <- sanger_multi_batch()$summary %>% filter(is.finite(Meth))
+    validate(need(nrow(d) > 0, "No finite methylation values are available for plotting."))
+    ggplot(d, aes(x=Sample, y=Meth, fill=Sample)) +
+      geom_col(colour="black", show.legend=FALSE) +
+      scale_y_continuous(limits=c(0,100), breaks=seq(0,100,20)) + theme_minimal(base_size=14)
+  })
   output$sanger_batch_table <- renderDT({ req(sanger_multi_batch()); datatable(sanger_multi_batch()$summary, rownames=FALSE) })
   
   output$sanger_multi_detail_selector <- renderUI({ req(sanger_multi_batch()); selectInput("sanger_multi_view_sample", "Select Sample:", choices=names(sanger_multi_batch()$details)) })
@@ -1497,7 +1749,7 @@ server <- function(input, output, session) {
   # Run Sanger Comp
   observeEvent(input$run_sanger_comp, { 
     if (is.null(sanger_multi_batch())) {
-      showNotification("Error: Please run Batch Analysis first.", type = "error")
+      showNotification("Error: Please run Batch Analysis first.", type = "error", duration = NULL)
       return()
     }
     if (is.null(input$sanger_grp1) || is.null(input$sanger_grp2)) {
@@ -1574,7 +1826,7 @@ server <- function(input, output, session) {
   
   # Run NGS Batch
   observeEvent(input$run_ngs, {
-    req(ngs_genomes_list(), input$ngs_target_select); files <- stored_ngs(); if(nrow(files)==0) { showNotification("No files.", type="error"); return() }
+    req(ngs_genomes_list(), input$ngs_target_select); files <- stored_ngs(); if(nrow(files)==0) { showNotification("No files.", type="error", duration = NULL); return() }
     
     all_genomes <- ngs_genomes_list()
     if(is.null(names(all_genomes))) names(all_genomes) <- paste0("Target_", seq_along(all_genomes))
@@ -1593,6 +1845,14 @@ server <- function(input, output, session) {
     }
     target_motifs <- trimws(target_motifs)
     target_motifs <- target_motifs[target_motifs != ""]
+    
+    ## This value belongs to the NGS observer. Defining it here prevents the
+    ## batch loop from referring to a variable created in the Sanger scope.
+    min_count <- suppressWarnings(as.integer(input$ngs_min_count))
+    if (is.na(min_count) || min_count < 1L) min_count <- 1L
+    workers <- suppressWarnings(as.integer(input$ngs_workers))
+    if (is.na(workers) || workers < 1L) workers <- .panda_workers
+    workers <- min(workers, 8L)
     
     res_list <- list(); het_list <- list(); sum_list <- list()
     
@@ -1632,6 +1892,7 @@ server <- function(input, output, session) {
               
               if (length(paired_seqs) > 0) {
                 counts <- sort(table(paired_seqs), decreasing = TRUE)
+                counts <- counts[counts >= min_count]
                 all_reads_set <- .panda_expand_dereplicated(counts, paired = TRUE)
                 top_seqs <- head(counts, input$ngs_top_n)
                 
@@ -1678,6 +1939,7 @@ server <- function(input, output, session) {
             
             if (length(reads_char) > 0) {
               counts <- sort(table(reads_char), decreasing = TRUE)
+              counts <- counts[counts >= min_count]
               all_reads_set <- .panda_expand_dereplicated(counts)
               reads_set <- .panda_expand_dereplicated(counts, input$ngs_top_n)
             } else {
@@ -1687,7 +1949,18 @@ server <- function(input, output, session) {
           }
           
           if (length(reads_set) > 0) {
-            res <- run_bisulfite_alignment(target_genome, reads_set, input$ngs_ident, input$ngs_conv, return_alignments = TRUE) 
+            ## Align the complete dereplicated set once.  The previous code
+            ## aligned Top-N and then aligned all sequences again for metrics.
+            ## The shared alignment cache prevents repeated work across files,
+            ## while this single full pass removes the within-sample duplicate.
+            res <- run_bisulfite_alignment(
+              target_genome,
+              all_reads_set,
+              input$ngs_ident,
+              input$ngs_conv,
+              return_alignments = TRUE,
+              workers = workers
+            )
             
             if(!is.null(res)) {
               if(isTRUE(res$was_flipped)) showNotification(paste(files$name[i], ": Reference automatically flipped to Reverse Complement."), type="warning", duration=10)
@@ -1721,23 +1994,18 @@ server <- function(input, output, session) {
               
               res$long_data <- res$long_data %>% mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")))
               res$read_summary <- res$read_summary %>% mutate(Count = as.integer(str_extract(ReadID, "(?<=Count)\\d+")))
-
-              ## Top N is retained for plots and downloadable alignments only.
-              ## Quantitative heterogeneity and methylation summaries use all
-              ## dereplicated sequences that pass the same biological QC.
+              
+              ## Quantitative summaries use the complete dereplicated result.
               metrics_res <- res
-              if (length(all_reads_set) > length(reads_set)) {
-                full_res <- run_bisulfite_alignment(
-                  target_genome, all_reads_set, input$ngs_ident,
-                  input$ngs_conv, return_alignments = FALSE
-                )
-                metrics_res <- .panda_finalize_ngs_result(full_res, is_unmerged_paired)
-              }
               if (is.null(metrics_res)) metrics_res <- res
               
+              ## Keep all retained variants for distribution and heatmap plots.
+              ## Top-N is applied only inside the lollipop plot.
+              display_res <- res
+              
               nm <- files$name[i]
-              res$metrics <- metrics_res
-              res_list[[nm]] <- res
+              display_res$metrics <- metrics_res
+              res_list[[nm]] <- display_res
               het_list[[nm]] <- calculate_heterogeneity(metrics_res)
               stats <- calculate_quma_stats(metrics_res, "NGS")
               
@@ -1758,7 +2026,7 @@ server <- function(input, output, session) {
           gc() 
           
         }, error = function(e) { 
-          showNotification(paste("Error in", files$name[i], ":", e$message), type="error") 
+          showNotification(paste("Error in", files$name[i], ":", e$message), type="error", duration = NULL) 
         })
       }
     })
@@ -1767,18 +2035,92 @@ server <- function(input, output, session) {
       ngs_batch_results(list(details=res_list, hets=het_list, summary=bind_rows(sum_list), genome=target_genome)) 
       if(length(target_motifs) > 0) showNotification(paste("Filtered by", length(target_motifs), "motifs."), type="message")
     } else { 
-      showNotification("No valid results. Check file format or filter criteria.", type="error") 
+      showNotification("No valid results. Check file format or filter criteria.", type="error", duration = NULL) 
     }
   })
   
-  output$ngs_batch_qc_plot <- renderPlot({ req(ngs_batch_results()); if(nrow(ngs_batch_results()$summary)>0) ggplot(ngs_batch_results()$summary, aes(x=Sample, y=Meth, fill=Sample)) + geom_bar(stat="identity", col="black", show.legend=FALSE) + ylim(0,100) + theme_minimal() + theme(axis.text.x=element_text(angle=45, hjust=1)) })
+  output$ngs_batch_qc_plot <- renderPlot({
+    req(ngs_batch_results())
+    summary_plot <- ngs_batch_results()$summary %>% filter(is.finite(Meth))
+    validate(need(nrow(summary_plot) > 0, "No finite methylation values are available for plotting."))
+    ggplot(summary_plot, aes(x=Sample, y=Meth, fill=Sample)) +
+      geom_col(colour="black", show.legend=FALSE) +
+      scale_y_continuous(limits=c(0,100), breaks=seq(0,100,20)) +
+      theme_minimal(base_size=14) +
+      theme(axis.text.x=element_text(angle=45, hjust=1))
+  })
   output$ngs_batch_table <- renderDT({ req(ngs_batch_results()); datatable(ngs_batch_results()$summary, rownames=FALSE) })
   output$ngs_detail_selector <- renderUI({ req(ngs_batch_results()); selectInput("ngs_view_sample", "Select Sample:", choices=names(ngs_batch_results()$details)) })
   get_ngs_sel <- reactive({ req(ngs_batch_results(), input$ngs_view_sample); list(res = ngs_batch_results()$details[[input$ngs_view_sample]], het = ngs_batch_results()$hets[[input$ngs_view_sample]]) })
   
   output$ngs_dist_plot <- renderPlot({ req(get_ngs_sel()); create_meth_histogram(get_ngs_sel()$res$long_data) })
   output$ngs_abund_heatmap <- renderPlot({ req(get_ngs_sel()); create_abundance_heatmap(get_ngs_sel()$res$long_data) })
-  output$ngs_lollipop_plot <- renderPlot({ req(get_ngs_sel()); create_lollipop_plot(get_ngs_sel()$res$long_data) })
+  output$ngs_lollipop_plot <- renderPlot({ req(get_ngs_sel()); create_lollipop_plot(get_ngs_sel()$res$long_data, top_n = input$ngs_top_n) })
+  
+  ## A click opens a larger modal without changing the underlying data or
+  ## ordering. The in-card plot remains scrollable for routine inspection.
+  observeEvent(input$ngs_abund_heatmap_click, {
+    showModal(modalDialog(
+      title = "Abundance heatmap (full size)",
+      modal_fit_css,
+      div(class = "panda-modal-plot",
+          plotOutput("ngs_abund_heatmap_modal", width = "100%", height = "76vh")),
+      size = "l", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$ngs_abund_heatmap_modal <- renderPlot({
+    req(get_ngs_sel())
+    create_abundance_heatmap(get_ngs_sel()$res$long_data)
+  }, res = 110)
+  
+  observeEvent(input$ngs_lollipop_click, {
+    showModal(modalDialog(
+      title = "Top abundant alleles (full size)",
+      modal_fit_css,
+      div(class = "panda-modal-plot",
+          plotOutput("ngs_lollipop_modal", width = "100%", height = "76vh")),
+      size = "l", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$ngs_lollipop_modal <- renderPlot({
+    req(get_ngs_sel())
+    create_lollipop_plot(get_ngs_sel()$res$long_data, top_n = input$ngs_top_n)
+  }, res = 110)
+  
+  observeEvent(input$ngs_batch_qc_click, {
+    showModal(modalDialog(
+      title = "NGS batch summary (full size)",
+      modal_fit_css,
+      div(class = "panda-modal-plot",
+          plotOutput("ngs_batch_qc_modal", width = "100%", height = "76vh")),
+      size = "l", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$ngs_batch_qc_modal <- renderPlot({
+    req(ngs_batch_results())
+    d <- ngs_batch_results()$summary %>% filter(is.finite(Meth))
+    validate(need(nrow(d) > 0, "No finite methylation values are available for plotting."))
+    ggplot(d, aes(x = Sample, y = Meth, fill = Sample)) +
+      geom_col(colour = "black", show.legend = FALSE) +
+      scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20)) +
+      theme_minimal(base_size = 16) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 13)) +
+      labs(x = "Sample", y = "Methylation (%)")
+  }, res = 110)
+  
+  observeEvent(input$ngs_dist_click, {
+    showModal(modalDialog(
+      title = "Methylation distribution (full size)",
+      modal_fit_css,
+      div(class = "panda-modal-plot",
+          plotOutput("ngs_dist_modal", width = "100%", height = "76vh")),
+      size = "l", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$ngs_dist_modal <- renderPlot({
+    req(get_ngs_sel())
+    create_meth_histogram(get_ngs_sel()$res$long_data)
+  }, res = 110)
   
   output$ngs_detail_het <- renderDT({ datatable(get_ngs_sel()$het$scores, options=list(dom='t'), rownames=FALSE) %>% formatRound(2, 3) })
   
@@ -1792,7 +2134,7 @@ server <- function(input, output, session) {
   # Run NGS Comp
   observeEvent(input$run_ngs_comp, { 
     if (is.null(ngs_batch_results())) {
-      showNotification("Error: Please run Batch Analysis first.", type = "error")
+      showNotification("Error: Please run Batch Analysis first.", type = "error", duration = NULL)
       return()
     }
     if (is.null(input$ngs_grp1) || is.null(input$ngs_grp2)) {
@@ -1813,6 +2155,36 @@ server <- function(input, output, session) {
   
   output$ngs_comp_diff_plot <- renderPlot({ req(ngs_comp_results()); create_diff_plot(ngs_comp_results()$site_table, ngs_comp_results()$g1_name, ngs_comp_results()$g2_name) })
   output$ngs_comp_bar_plot <- renderPlot({ req(ngs_comp_results()); create_comp_barplot(ngs_comp_results()$summary) })
+  
+  observeEvent(input$ngs_comp_diff_click, {
+    showModal(modalDialog(
+      title = "NGS differential methylation (full size)",
+      modal_fit_css,
+      div(class = "panda-modal-plot",
+          plotOutput("ngs_comp_diff_modal", width = "100%", height = "76vh")),
+      size = "l", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$ngs_comp_diff_modal <- renderPlot({
+    req(ngs_comp_results())
+    create_diff_plot(ngs_comp_results()$site_table,
+                     ngs_comp_results()$g1_name,
+                     ngs_comp_results()$g2_name)
+  }, res = 110)
+  
+  observeEvent(input$ngs_comp_bar_click, {
+    showModal(modalDialog(
+      title = "NGS group methylation comparison (full size)",
+      modal_fit_css,
+      div(class = "panda-modal-plot",
+          plotOutput("ngs_comp_bar_modal", width = "100%", height = "76vh")),
+      size = "l", easyClose = TRUE, footer = modalButton("Close")
+    ))
+  })
+  output$ngs_comp_bar_modal <- renderPlot({
+    req(ngs_comp_results())
+    create_comp_barplot(ngs_comp_results()$summary)
+  }, res = 110)
   output$ngs_comp_stat_txt <- renderPrint({ req(ngs_comp_results()); cat("P-value:", ngs_comp_results()$u_test_p) })
   
   output$ngs_comp_site_table <- renderDT({ 
@@ -1880,7 +2252,7 @@ server <- function(input, output, session) {
       write.csv(calculate_quma_stats(sanger_single_res(), "Sanger")$cpg_table, "CpG_Stats.csv", row.names=F)
       
       p_lol <- create_lollipop_plot(sanger_single_res()$long_data)
-      if(!is.null(p_lol)) { ggsave("Plot_Lollipop.pdf", p_lol, width=10, height=5.5); fs <- c(fs, "Plot_Lollipop.pdf") }
+      if(!is.null(p_lol)) { ggsave("Plot_Lollipop.pdf", p_lol, width=13, height=7.15); fs <- c(fs, "Plot_Lollipop.pdf") }
       
       p_asm <- create_asm_heatmap(sanger_single_het())
       if(!is.null(p_asm)) { ggsave("Plot_ASM.pdf", p_asm, width=8, height=8); fs <- c(fs, "Plot_ASM.pdf") }
@@ -1899,8 +2271,10 @@ server <- function(input, output, session) {
       write.csv(batch$summary, "Batch_Summary.csv", row.names=F)
       
       try({
-        p_sum <- ggplot(batch$summary, aes(x=Sample, y=Meth, fill=Sample)) + 
-          geom_bar(stat="identity", col="black", show.legend=FALSE) + ylim(0,100) + theme_minimal()
+        d_sum <- batch$summary %>% filter(is.finite(Meth))
+        p_sum <- ggplot(d_sum, aes(x=Sample, y=Meth, fill=Sample)) +
+          geom_col(colour="black", show.legend=FALSE) +
+          scale_y_continuous(limits=c(0,100), breaks=seq(0,100,20)) + theme_minimal(base_size=14)
         ggsave("Batch_Summary_Plot.png", p_sum, width=10, height=6, dpi=600)
       })
       
@@ -1970,7 +2344,10 @@ server <- function(input, output, session) {
       if(!is.null(p1)) { ggsave("Comp_Diff_Plot.pdf", p1, width=8, height=6); fs <- c(fs, "Comp_Diff_Plot.pdf") }
       
       p2 <- create_comp_barplot(comp$summary)
-      if(!is.null(p2)) { ggsave("Comp_Mean_Bar.pdf", p2, width=6, height=6); fs <- c(fs, "Comp_Mean_Bar.pdf") }
+      if(!is.null(p2)) {
+        ggsave("Comp_Mean_Bar.pdf", p2, width=6.5, height=5.5)
+        fs <- c(fs, "Comp_Mean_Bar.pdf")
+      }
       
       zip(file, fs)
     }
@@ -1985,8 +2362,11 @@ server <- function(input, output, session) {
       
       write.csv(batch$summary, "NGS_Batch_Summary.csv", row.names=F)
       try({
-        p_sum <- ggplot(batch$summary, aes(x=Sample, y=Meth, fill=Sample)) + 
-          geom_bar(stat="identity", col="black", show.legend=FALSE) + ylim(0,100) + theme_minimal() + theme(axis.text.x=element_text(angle=45, hjust=1))
+        d_sum <- batch$summary %>% filter(is.finite(Meth))
+        p_sum <- ggplot(d_sum, aes(x=Sample, y=Meth, fill=Sample)) +
+          geom_col(colour="black", show.legend=FALSE) +
+          scale_y_continuous(limits=c(0,100), breaks=seq(0,100,20)) +
+          theme_minimal(base_size=14) + theme(axis.text.x=element_text(angle=45, hjust=1))
         ggsave("NGS_Batch_Summary_Plot.png", p_sum, width=10, height=6, dpi=600)
       })
       
@@ -2023,7 +2403,11 @@ server <- function(input, output, session) {
             if(!is.null(p1)) ggsave(file.path(plot_dir, paste0(safe_nm, "_Histogram.png")), p1, width=8, height=6, dpi=600)
             
             p2 <- create_abundance_heatmap(res$long_data)
-            if(!is.null(p2)) ggsave(file.path(plot_dir, paste0(safe_nm, "_Abundance_Heatmap.png")), p2, width=8, height=6, dpi=600)
+            if(!is.null(p2)) {
+              hm_height <- max(8, min(10, 6 + 0.0015 * dplyr::n_distinct(res$long_data$ReadID)))
+              ggsave(file.path(plot_dir, paste0(safe_nm, "_Abundance_Heatmap.png")),
+                     p2, width=13, height=hm_height, dpi=600)
+            }
             
             p3 <- create_lollipop_plot(res$long_data, point_size = pt_size, text_size = txt_size)
             if(!is.null(p3)) ggsave(file.path(plot_dir, paste0(safe_nm, "_Lollipop.png")), p3, width=8, height=calc_h, limitsize = FALSE, dpi=600)
@@ -2060,7 +2444,10 @@ server <- function(input, output, session) {
       if(!is.null(p1)) { ggsave("NGS_Comp_Diff.pdf", p1, width=8, height=6); fs <- c(fs, "NGS_Comp_Diff.pdf") }
       
       p2 <- create_comp_barplot(comp$summary)
-      if(!is.null(p2)) { ggsave("NGS_Comp_Bar.pdf", p2, width=6, height=6); fs <- c(fs, "NGS_Comp_Bar.pdf") }
+      if(!is.null(p2)) {
+        ggsave("NGS_Comp_Bar.pdf", p2, width=6.5, height=5.5)
+        fs <- c(fs, "NGS_Comp_Bar.pdf")
+      }
       
       zip(file, fs)
     }
