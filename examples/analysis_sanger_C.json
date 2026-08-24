@@ -1,0 +1,14 @@
+{
+  "mode": "sanger",
+  "input": "PANDA_Demo/Sanger/Multi/ExpC_Group",
+  "reference": "PANDA_Demo/Sanger/Reference/Sanger_Ref_Targets.fasta",
+  "reference_target": "mm10_Nanog_Promoter",
+  "output": "results/demo_sanger_C",
+  "min_identity": 90,
+  "min_conversion": 95,
+  "workers": 4,
+  "groups": {
+    "WT": ["Sanger_Nanog_WT_Rep1", "Sanger_Nanog_WT_Rep2", "Sanger_Nanog_WT_Rep3"],
+    "KO": ["Sanger_Nanog_KO_Rep1", "Sanger_Nanog_KO_Rep2", "Sanger_Nanog_KO_Rep3"]
+  }
+}

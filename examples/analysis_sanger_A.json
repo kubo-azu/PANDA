@@ -1,0 +1,14 @@
+{
+  "mode": "sanger",
+  "input": "PANDA_Demo/Sanger/Multi/ExpA_ASM",
+  "reference": "PANDA_Demo/Sanger/Reference/Sanger_Ref_Targets.fasta",
+  "reference_target": "mm10_H19_DMR",
+  "output": "results/demo_sanger_A",
+  "min_identity": 90,
+  "min_conversion": 95,
+  "workers": 4,
+  "groups": {
+    "Normal": ["Sanger_H19_Normal_Rep1", "Sanger_H19_Normal_Rep2", "Sanger_H19_Normal_Rep3"],
+    "LOI": ["Sanger_H19_LOI_Rep1", "Sanger_H19_LOI_Rep2", "Sanger_H19_LOI_Rep3"]
+  }
+}

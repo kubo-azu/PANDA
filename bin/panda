@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Project-local PANDA command launcher.
+# The R scripts remain the implementation; this wrapper provides a conventional
+# subcommand interface without requiring a system-wide installation.
+# Resolve symlinks so ~/.local/bin/panda still locates this repository.
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SOURCE" ]]; do
+  SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="${SOURCE_DIR}/${SOURCE}"
+done
+BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)"
+PROJECT_ROOT="$(CDPATH= cd -- "${BIN_DIR}/.." && pwd)"
+R_SCRIPT="${R_PANDA_RSCRIPT:-Rscript}"
+
+usage() {
+  cat <<'EOF'
+PANDA command-line interface
+
+Usage:
+  panda analyze --mode MODE --input INPUT --reference REF [options]
+  panda analyze analysis.yml [override options]
+  panda analyze -c analysis.yml [override options]
+  panda plot RESULTS_DIR [--figures FIGURE [FIGURE ...]]
+  panda plot -r RESULTS_DIR
+  panda compare RESULTS_DIR [group options]
+  panda --help
+
+Commands:
+  analyze    Run sequence alignment and calculate statistics.
+  plot       Create PDF plots from a completed analysis.
+  compare    Compare two groups from a completed analysis.
+
+The underlying R scripts can still be called directly when needed.
+
+Run 'panda analyze --help' for the complete analysis option list.
+EOF
+}
+
+normalize_analyze_args() {
+  NORMALIZED=()
+  local config_seen=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -c|--config-file)
+        [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 2; }
+        NORMALIZED+=(--config "$2"); config_seen=1; shift 2 ;;
+      --config)
+        [[ $# -ge 2 ]] || { echo "--config requires a value." >&2; exit 2; }
+        NORMALIZED+=(--config "$2"); config_seen=1; shift 2 ;;
+      --mode|--input|--reference|--reference-target|--output-dir|--min-identity|--min-conversion|--min-count|--workers|--read-mode|--max-reads|--max-unique-reads|--motif-file|--motifs|--ab1-trim-start|--ab1-trim-end|--cluster-method|--k|--seed|-i|-r)
+        [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 2; }
+        NORMALIZED+=("$1" "$2"); shift 2 ;;
+      --*)
+        NORMALIZED+=("$1"); shift ;;
+      -*)
+        NORMALIZED+=("$1"); shift ;;
+      *)
+        if [[ "$config_seen" -eq 0 ]]; then
+          NORMALIZED+=(--config "$1"); config_seen=1
+        else
+          NORMALIZED+=("$1")
+        fi
+        shift ;;
+    esac
+  done
+}
+
+normalize_results_args() {
+  NORMALIZED=()
+  local results_seen=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -r|--result-dir)
+        [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 2; }
+        NORMALIZED+=(--results "$2"); results_seen=1; shift 2 ;;
+      --results)
+        [[ $# -ge 2 ]] || { echo "--results requires a value." >&2; exit 2; }
+        NORMALIZED+=(--results "$2"); results_seen=1; shift 2 ;;
+      --*) NORMALIZED+=("$1"); shift ;;
+      -*) NORMALIZED+=("$1"); shift ;;
+      *)
+        if [[ "$results_seen" -eq 0 ]]; then
+          NORMALIZED+=(--results "$1"); results_seen=1
+        else
+          NORMALIZED+=("$1")
+        fi
+        shift ;;
+    esac
+  done
+  if [[ "$results_seen" -eq 0 ]]; then
+    echo "This command requires a results directory." >&2
+    exit 2
+  fi
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
+command="$1"
+shift
+
+case "$command" in
+  analyze|analysis|run)
+    normalize_analyze_args "$@"
+    exec "$R_SCRIPT" "${PROJECT_ROOT}/cli/panda.R" "${NORMALIZED[@]}"
+    ;;
+  plot|plots)
+    normalize_results_args "$@"
+    exec "$R_SCRIPT" "${PROJECT_ROOT}/cli/panda_plot.R" "${NORMALIZED[@]}"
+    ;;
+  compare|comparison)
+    normalize_results_args "$@"
+    exec "$R_SCRIPT" "${PROJECT_ROOT}/cli/panda_compare.R" "${NORMALIZED[@]}"
+    ;;
+  --help|-h|help)
+    usage
+    ;;
+  --version|-V|version)
+    echo "PANDA CLI 1.0.0"
+    ;;
+  *)
+    echo "panda: unknown command: ${command}" >&2
+    echo "Run 'panda --help' for usage." >&2
+    exit 2
+    ;;
+esac

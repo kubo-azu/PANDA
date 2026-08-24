@@ -1,0 +1,13 @@
+{
+  "mode": "sanger",
+  "input": "PANDA_Demo/Sanger/Multi/ExpB_Phasing",
+  "reference": "PANDA_Demo/Sanger/Reference/Sanger_Ref_Targets.fasta",
+  "reference_target": "mm10_H19_DMR",
+  "output": "results/demo_sanger_B",
+  "min_identity": 90,
+  "min_conversion": 95,
+  "workers": 4,
+  "groups": {
+    "Phased heterogeneity": ["Sanger_H19_Hetero_Phased_Rep1", "Sanger_H19_Hetero_Phased_Rep2", "Sanger_H19_Hetero_Phased_Rep3"]
+  }
+}
