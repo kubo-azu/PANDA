@@ -953,14 +953,13 @@ create_diff_plot <- function(site_table, g1_name="Group 1", g2_name="Group 2") {
 # 2. UI (Frontend)
 # ==============================================================================
 ui <- page_navbar(
-  title = "PANDA", 
+  title = "PANDA (v1.0.0)", 
   theme = bs_theme(bootswatch = "minty"),
   header = shinyjs::useShinyjs(),
   
   nav_panel(title = "Introduction",
             card(
               h3("PANDA: Phased ANalysis of DNA Amplicons"),
-              span(class = "badge bg-primary", "Version 1.0.0"),
               p(
                 em("A unified platform for read-level phased bisulfite analysis of targeted amplicons (Sanger & NGS)"),
                 br(), 
