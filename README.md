@@ -79,6 +79,7 @@ From a cloned repository:
 ```bash
 git clone https://github.com/kubo-azu/PANDA.git
 cd PANDA
+Rscript -e 'install.packages("renv", repos="https://cloud.r-project.org")'
 Rscript -e 'renv::restore()'
 ./install_panda.sh
 ```
@@ -92,6 +93,42 @@ export PATH="$HOME/.local/bin:$PATH"
 
 No administrator privileges are required. The installer does not modify the
 system R installation or install packages outside the project environment.
+
+### Optional: use PANDA inside a conda environment
+
+PANDA can also be installed inside a conda environment. This is useful on
+servers or when the R runtime itself must be isolated. The recommended
+division of responsibility is:
+
+- **conda** manages the R runtime and system-level libraries;
+- **renv** manages PANDA's R and Bioconductor packages inside the repository.
+
+For example:
+
+```bash
+conda create -n panda-r -c conda-forge r-base=4.6.1
+conda activate panda-r
+
+cd PANDA
+Rscript -e 'install.packages("renv", repos="https://cloud.r-project.org")'
+Rscript -e 'renv::restore(prompt = FALSE)'
+./install_panda.sh
+panda --help
+```
+
+Confirm that the intended interpreter is active before restoring the project:
+
+```bash
+which Rscript
+Rscript -e 'cat(R.version.string, "\n"); cat(R.home(), "\n")'
+```
+
+Do not install PANDA's Bioconductor dependencies separately through both
+conda and R; let `renv::restore()` install the versions recorded in
+`renv.lock`. The conda environment should use the R version specified by the
+lockfile. On macOS, the conda architecture (arm64 or x86_64) should also
+match the R and compiled-package ecosystem available on the machine. Hosted
+GUI users do not need conda, R, or renv at all.
 
 ## 🖥️ GUI workflow
 
