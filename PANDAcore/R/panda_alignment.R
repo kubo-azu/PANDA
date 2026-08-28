@@ -40,8 +40,29 @@
   pwalign::nucleotideSubstitutionMatrix(...)
 }
 
+# Select a BiocParallel backend while keeping the public CLI/API
+# OS-independent.  MulticoreParam is efficient on Unix-like systems;
+# SnowParam is the portable socket-based backend used on Windows.
+.panda_bpparam <- function(workers) {
+  workers <- suppressWarnings(as.integer(workers))
+  if (is.na(workers) || workers < 1L) workers <- 1L
+  if (workers == 1L) {
+    BiocParallel::SerialParam(progressbar = FALSE)
+  } else if (.Platform$OS.type == "windows" ||
+             identical(Sys.getenv("PANDA_NO_FORK"), "1") ||
+             isTRUE(getOption("panda.no_fork", FALSE))) {
+    BiocParallel::SnowParam(
+      workers = workers, type = "SOCK", progressbar = FALSE
+    )
+  } else {
+    BiocParallel::MulticoreParam(
+      workers = workers, progressbar = FALSE
+    )
+  }
+}
+
 run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
-                                    min_conversion = 95, return_alignments = TRUE, workers = 1L) {
+                                    min_conversion = 95, return_alignments = TRUE, workers = 16L) {
   if (methods::is(genome_seq, "DNAStringSet")) 
     genome_seq <- genome_seq[[1]]
   genome_seq <- DNAString(as.character(genome_seq))
@@ -150,15 +171,13 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
   
   workers <- suppressWarnings(as.integer(workers))
   if (is.na(workers) || workers < 1L) workers <- 1L
-  if (workers > 1L && .Platform$OS.type == "windows") {
-    message("  Windows detected: using serial alignment for portability.")
-    workers <- 1L
-  }
-  
-  ## Precompute the two strand alignments in parallel.  The alignment
-  ## algorithm and scoring are unchanged; only scheduling differs.
-  align_one_read <- function(i) {
+  workers <- min(workers, 16L)
+
+  ## Complete one read inside the worker and return only compact results.
+  ## PairwiseAlignment objects never cross the worker boundary.
+  process_one_read <- function(i) {
     raw_read_seq <- reads_set[[i]]
+    read_name <- names(reads_set)[i]
     read_F <- raw_read_seq
     read_F_T <- chartr("C", "T", read_F)
     aln_F <- .panda_pairwiseAlignment(
@@ -173,20 +192,104 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
       substitutionMatrix = sub_mat,
       gapOpening = gap_op, gapExtension = gap_ext
     )
-    list(read_F = read_F, read_R = read_R, aln_F = aln_F, aln_R = aln_R)
+    if (score(aln_F) >= score(aln_R)) {
+      best_aln <- aln_F; final_read_seq <- read_F; strand <- "Forward"
+    } else {
+      best_aln <- aln_R; final_read_seq <- read_R; strand <- "Reverse"
+    }
+    aln_pat_converted <- as.character(pattern(best_aln))
+    raw_bases <- strsplit(as.character(final_read_seq), "")[[1]]
+    aln_template <- strsplit(aln_pat_converted, "")[[1]]
+    reconstructed_pat_chars <- character(length(aln_template))
+    raw_idx <- start(pattern(best_aln))
+    for (j in seq_along(aln_template)) {
+      if (aln_template[j] == "-") reconstructed_pat_chars[j] <- "-"
+      else if (raw_idx <= length(raw_bases)) {
+        reconstructed_pat_chars[j] <- raw_bases[raw_idx]; raw_idx <- raw_idx + 1L
+      } else reconstructed_pat_chars[j] <- "N"
+    }
+    aln_sub_str <- as.character(subject(best_aln))
+    aln_len <- length(reconstructed_pat_chars)
+    n_match <- nmatch(best_aln)
+    total_gaps <- str_count(aln_pat_converted, "-") + str_count(aln_sub_str, "-")
+    identity_score <- (n_match / aln_len) * 100
+    curr_g_pos <- start(subject(best_aln)) - 1L
+    sub_chars <- strsplit(aln_sub_str, "")[[1]]
+    tmp_meth <- integer(); tmp_pos <- integer()
+    conv_C_count <- 0L; unconv_C_count <- 0L
+    for (k in seq_len(aln_len)) {
+      s_char <- sub_chars[k]; p_char <- reconstructed_pat_chars[k]
+      if (s_char != "-") curr_g_pos <- curr_g_pos + 1L
+      if (s_char == "-" || p_char == "-") next
+      orig_g_base <- substring(genome_seq_char, curr_g_pos, curr_g_pos)
+      if (orig_g_base == "C") {
+        if (curr_g_pos %in% cpg_sites) {
+          if (p_char == "C") { tmp_meth <- c(tmp_meth, 1L); tmp_pos <- c(tmp_pos, curr_g_pos) }
+          else if (p_char == "T") { tmp_meth <- c(tmp_meth, 0L); tmp_pos <- c(tmp_pos, curr_g_pos) }
+        } else if (p_char == "C") unconv_C_count <- unconv_C_count + 1L
+        else if (p_char == "T") conv_C_count <- conv_C_count + 1L
+      }
+    }
+    total_cph <- unconv_C_count + conv_C_count
+    conv_rate <- if (total_cph > 0) (conv_C_count / total_cph) * 100 else 100
+    exclusion_reason <- ""
+    if (identity_score < min_identity) exclusion_reason <- paste0("excluded (Id:", round(identity_score, 1), "%)")
+    else if (conv_rate < min_conversion) exclusion_reason <- paste0("excluded (Conv:", round(conv_rate, 1), "%)")
+    if (exclusion_reason == "") {
+      meth_pct <- if (length(tmp_meth) > 0) round(mean(tmp_meth) * 100, 1) else NA_real_
+      cpg_count <- length(tmp_meth); pattern_label <- "Passed"
+      long_data <- data.frame(ReadID = rep(read_name, length(tmp_pos)), Strand = rep(strand, length(tmp_pos)),
+                              Position = tmp_pos, Methylation = tmp_meth, stringsAsFactors = FALSE)
+      pairwise <- if (return_alignments) paste0(
+        "> ", read_name, "\nGen: ", aln_sub_str, "\nSeq: ",
+        paste(reconstructed_pat_chars, collapse = ""), "\n") else character()
+    } else {
+      meth_pct <- NA_real_; cpg_count <- 0L; pattern_label <- exclusion_reason
+      long_data <- data.frame(ReadID = character(), Strand = character(), Position = integer(),
+                              Methylation = integer(), stringsAsFactors = FALSE)
+      pairwise <- character()
+    }
+    list(read_summary = data.frame(ReadID = read_name, Strand = strand,
+                                   Mismatches = aln_len - n_match, Gaps = total_gaps,
+                                   Identity_Pct = round(identity_score, 1), Meth_Pct = meth_pct,
+                                   Conv_Pct = round(conv_rate, 1), CpG_Count = cpg_count,
+                                   Pattern = pattern_label, stringsAsFactors = FALSE),
+         long_data = long_data, pairwise = pairwise)
   }
   
-  alignment_pairs <- if (workers > 1L && n_total_reads > 1L) {
+  combine_read_results <- function(items) {
+    summary_parts <- lapply(items, `[[`, "read_summary")
+    long_parts <- lapply(items, `[[`, "long_data")
+    long_data <- if (any(vapply(long_parts, nrow, integer(1)) > 0L)) {
+      do.call(rbind, long_parts)
+    } else {
+      data.frame(ReadID = character(), Strand = character(), Position = integer(),
+                 Methylation = integer(), stringsAsFactors = FALSE)
+    }
+    list(
+      read_summary = do.call(rbind, summary_parts),
+      long_data = long_data,
+      pairwise = unlist(lapply(items, `[[`, "pairwise"), use.names = FALSE)
+    )
+  }
+
+  processed_chunks <- if (workers > 1L && n_total_reads > 1L) {
     message(
       "  Parallel alignment: ", n_total_reads,
       " representatives on ", workers, " workers"
     )
-    parallel::mclapply(
-      seq_len(n_total_reads), align_one_read,
-      mc.cores = workers, mc.preschedule = TRUE
+    n_chunks <- min(n_total_reads, max(1L, workers * 4L))
+    chunks <- split(
+      seq_len(n_total_reads),
+      cut(seq_len(n_total_reads), breaks = n_chunks, labels = FALSE)
+    )
+    BiocParallel::bplapply(
+      chunks,
+      function(idx) combine_read_results(lapply(idx, process_one_read)),
+      BPPARAM = .panda_bpparam(workers)
     )
   } else {
-    lapply(seq_len(n_total_reads), align_one_read)
+    list(combine_read_results(lapply(seq_len(n_total_reads), process_one_read)))
   }
   
   for (i in seq_len(n_total_reads)) {
@@ -197,6 +300,9 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
     }
     if (i%%500 == 0)
       gc()
+    ## Per-read analysis is complete in process_one_read().  Keep this
+    ## progress loop lightweight and preserve the historical progress log.
+    next
     alignment_pair <- alignment_pairs[[i]]
     raw_read_seq <- alignment_pair$read_F
     read_name <- names(reads_set)[i]
@@ -327,20 +433,33 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
       sum_meth_cpgs <- c(sum_meth_cpgs, 0)
     }
   }
-  if (length(sum_id) == 0) 
-    return(NULL)
-  read_summary_df <- data.frame(ReadID = sum_id, Strand = sum_strand, 
-                                Mismatches = sum_mm, Gaps = sum_gaps, Identity_Pct = sum_ident, 
-                                Meth_Pct = sum_meth_pct, Conv_Pct = sum_conv_pct, CpG_Count = sum_meth_cpgs, 
-                                Pattern = sum_pattern, stringsAsFactors = FALSE)
-  long_data_df <- data.frame(ReadID = res_ids, Strand = res_strands, 
-                             Position = res_pos, Methylation = res_meth, stringsAsFactors = FALSE)
-  return(list(long_data = long_data_df, read_summary = read_summary_df, 
-              genome_info = list(len = nchar(genome_seq_char), n_cpg = length(cpg_sites), 
-                                 cpg_pos = cpg_sites, seq = genome_seq_char), counts = list(total = n_total_reads, 
-                                                                                            used = n_total_reads - n_excluded, excluded = n_excluded), 
-              alignments = list(pairwise = pairwise_txt_list, multi = multi_align_seqs), 
-              was_flipped = was_flipped))
+  ## Combine compact worker results in the original input order.
+  read_summary_df <- do.call(rbind, lapply(processed_chunks, `[[`, "read_summary"))
+  long_parts <- lapply(processed_chunks, `[[`, "long_data")
+  long_data_df <- if (any(vapply(long_parts, nrow, integer(1)) > 0L)) {
+    do.call(rbind, long_parts)
+  } else {
+    data.frame(ReadID = character(), Strand = character(), Position = integer(),
+               Methylation = integer(), stringsAsFactors = FALSE)
+  }
+  pairwise_txt_list <- unlist(lapply(processed_chunks, `[[`, "pairwise"), use.names = FALSE)
+  n_excluded <- sum(grepl("^excluded", read_summary_df$Pattern))
+  if (nrow(read_summary_df) == 0) return(NULL)
+  return(list(
+    long_data = long_data_df,
+    read_summary = read_summary_df,
+    genome_info = list(
+      len = nchar(genome_seq_char), n_cpg = length(cpg_sites),
+      cpg_pos = cpg_sites, seq = genome_seq_char
+    ),
+    counts = list(
+      total = n_total_reads,
+      used = n_total_reads - n_excluded,
+      excluded = n_excluded
+    ),
+    alignments = list(pairwise = pairwise_txt_list, multi = multi_align_seqs),
+    was_flipped = was_flipped
+  ))
 }
 
 process_ab1_files <- function(file_paths, file_names, trim_start = 20, 

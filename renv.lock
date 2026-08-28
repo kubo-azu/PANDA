@@ -355,12 +355,13 @@
       "VignetteBuilder": "knitr",
       "RoxygenNote": "7.1.2",
       "Repository": "https://bioc-release.r-universe.dev",
-      "RemoteUrl": "https://github.com/bioc/BiocParallel",
-      "RemoteRef": "RELEASE_3_23",
-      "RemoteSha": "a331dfd2695daec754304505bdbd7358eef009fa",
       "NeedsCompilation": "yes",
       "Author": "Jiefei Wang [aut, cre], Martin Morgan [aut], Valerie Obenchain [aut], Michel Lang [aut], Ryan Thompson [aut], Nitesh Turaga [aut], Aaron Lun [ctb], Henrik Bengtsson [ctb], Madelyn Carlson [ctb] (Translated 'Random Numbers' vignette from Sweave to RMarkdown / HTML.), Phylis Atieno [ctb] (Translated 'Introduction to BiocParallel' vignette from Sweave to Rmarkdown / HTML.), Sergio Oller [ctb] (Improved bpmapply() efficiency., ORCID: <https://orcid.org/0000-0002-8994-1549>)",
-      "Maintainer": "Jiefei Wang <jiefei0804@gmail.com>"
+      "Maintainer": "Jiefei Wang <jiefei0804@gmail.com>",
+      "RemoteType": "repository",
+      "RemoteUrl": "https://github.com/bioc/BiocParallel",
+      "RemoteRef": "RELEASE_3_23",
+      "RemoteSha": "a331dfd2695daec754304505bdbd7358eef009fa"
     },
     "BiocVersion": {
       "Package": "BiocVersion",
@@ -869,6 +870,8 @@
       "Type": "Package",
       "Title": "Core Analysis Engine for PANDA",
       "Authors@R": "person(\"PANDA\", \"Developers\", role = c(\"aut\", \"cre\"), email = \"panda@example.org\")",
+      "Author": "PANDA Developers [aut, cre]",
+      "Maintainer": "PANDA Developers <panda@example.org>",
       "Description": "Shared analysis functions for the PANDA graphical and command-line interfaces. The package is intended for reproducible analysis of Sanger and amplicon sequencing data, including sequence alignment, methylation profiling, and heterogeneity analysis.",
       "License": "MIT + file LICENSE",
       "Encoding": "UTF-8",
@@ -878,10 +881,12 @@
         "R (>= 4.2.0)"
       ],
       "Imports": [
+        "BiocParallel",
         "Biostrings",
         "dplyr",
         "jsonlite",
         "magrittr",
+        "methods",
         "pwalign",
         "sangerseqR",
         "stats",
@@ -895,8 +900,6 @@
         "yaml"
       ],
       "Config/testthat/edition": "3",
-      "Author": "PANDA Developers [aut, cre]",
-      "Maintainer": "PANDA Developers <panda@example.org>",
       "RemoteType": "local",
       "RemoteUrl": "./PANDAcore"
     },

@@ -470,8 +470,10 @@ if (!is.null(config$motif_file)) {
 workers <- if (!is.null(config$workers)) {
   as.integer(config$workers[[1L]])
 } else {
-  1L
+  16L
 }
+if (is.na(workers) || workers < 1L) workers <- 1L
+workers <- min(workers, 16L)
 
 cluster_method <- if (!is.null(config$cluster_method)) as.character(config$cluster_method[[1L]]) else "kmeans"
 cluster_k <- if (!is.null(config$k)) as.integer(config$k[[1L]]) else 2L
@@ -615,11 +617,23 @@ for (record_index in seq_len(nrow(input_records))) {
     }
   }
 
-  cat(
-    "  Motif-filtered reads: ", motif_retained_n,
-    if (is.finite(max_reads) && motif_retained_n > raw_read_n) paste0(" (capped at ", raw_read_n, ")") else "",
-    "\n", sep = ""
-  )
+  if (length(motifs) > 0L) {
+    cat(
+      "  Motif-filtered reads: ", motif_retained_n,
+      if (is.finite(max_reads) && motif_retained_n > raw_read_n) {
+        paste0(" (analysis capped at ", raw_read_n, ")")
+      } else "",
+      "\n", sep = ""
+    )
+  } else {
+    cat(
+      "  Input reads: ", raw_input_n,
+      if (is.finite(max_reads) && raw_input_n > raw_read_n) {
+        paste0(" (analysis capped at ", raw_read_n, ")")
+      } else "",
+      "\n", sep = ""
+    )
+  }
   
   cat(
     "  Raw reads: ", raw_read_n,

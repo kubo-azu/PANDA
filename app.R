@@ -13,6 +13,9 @@ library(sangerseqR)
 if (!requireNamespace("pwalign", quietly = TRUE)) {
   stop("Package 'pwalign' is required. Install it through the project environment.")
 }
+if (!requireNamespace("PANDAcore", quietly = TRUE)) {
+  stop("Package 'PANDAcore' is required. Install it with renv::install('./PANDAcore').")
+}
 .panda_has_pwalign <- TRUE
 .panda_alignment_cache <- new.env(parent = emptyenv())
 .panda_alignment_cache_limit <- 10000L
@@ -42,11 +45,17 @@ if (!requireNamespace("pwalign", quietly = TRUE)) {
 # ==============================================================================
 # Maximum 300MB for large NGS FASTQ files
 options(shiny.maxRequestSize = 300 * 1024^2)
+# Shiny reactive contexts cannot safely cross forked processes.  The shared
+# engine therefore uses the portable socket backend for GUI requests.
+Sys.setenv(PANDA_NO_FORK = "1")
+options(panda.no_fork = TRUE)
 
 # Optional NGS parallelism. The alignment algorithm and results are unchanged;
 # workers only distribute independent representative alignments. Users can
 # override this in the GUI or with PANDA_WORKERS before launching the app.
-.panda_default_workers <- max(1L, min(8L, parallel::detectCores(logical = FALSE)))
+# The public default and maximum are both 16; constrained hosts can override
+# PANDA_WORKERS (for example, use 2 on a free Hugging Face Space).
+.panda_default_workers <- 16L
 .panda_workers <- suppressWarnings(as.integer(Sys.getenv("PANDA_WORKERS", as.character(.panda_default_workers))))
 if (is.na(.panda_workers) || .panda_workers < 1L) .panda_workers <- 1L
 
@@ -58,7 +67,7 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
                                     min_identity = 90, 
                                     min_conversion = 95,
                                     return_alignments = TRUE,
-                                    workers = 1L) {
+                                    workers = 16L) {
   
   if (is(genome_seq, "DNAStringSet")) genome_seq <- genome_seq[[1]]
   genome_seq <- DNAString(as.character(genome_seq))
@@ -364,6 +373,33 @@ process_ab1_files <- function(file_paths, file_names, trim_start = 20, trim_end 
     }, error = function(e) warning(paste("Failed:", file_names[i])))
   }
   return(seq_list)
+}
+
+# Use the shared PANDAcore engine for all GUI alignments.  This keeps the GUI
+# and CLI on the same OS-independent BiocParallel backend and avoids maintaining
+# a second alignment implementation in app.R.
+run_bisulfite_alignment <- function(genome_seq, reads_set,
+                                    min_identity = 90,
+                                    min_conversion = 95,
+                                    return_alignments = TRUE,
+                                    workers = 16L) {
+  ## Force all Shiny inputs in the parent process before creating workers.
+  ## Otherwise a lazy promise such as input$ngs_ident can be evaluated inside
+  ## a worker, where no reactive context exists.
+  genome_seq <- force(genome_seq)
+  reads_set <- force(reads_set)
+  min_identity <- as.numeric(force(min_identity))
+  min_conversion <- as.numeric(force(min_conversion))
+  return_alignments <- isTRUE(force(return_alignments))
+  workers <- as.integer(force(workers))
+  PANDAcore::run_bisulfite_alignment(
+    genome_seq = genome_seq,
+    reads_set = reads_set,
+    min_identity = min_identity,
+    min_conversion = min_conversion,
+    return_alignments = return_alignments,
+    workers = workers
+  )
 }
 
 ## Read one FASTA/FASTQ file while preserving multi-line FASTA records and
@@ -1327,7 +1363,7 @@ ui <- page_navbar(
                     selectInput("ngs_type", "Type", choices = c("FASTQ (fastq/fq.gz)" = "fastq", "FASTA" = "fasta")),
                     sliderInput("ngs_top_n", "Top N for lollipop plot", 10, 100, 30),
                     numericInput("ngs_min_count", "Minimum read count for metrics", value = 1, min = 1, step = 1),
-                    numericInput("ngs_workers", "Alignment workers (parallel)", value = min(.panda_workers, 8L), min = 1, max = 8, step = 1),
+                    numericInput("ngs_workers", "Alignment workers (parallel)", value = min(.panda_workers, 16L), min = 1, max = 16, step = 1),
                     sliderInput("ngs_conv", "Min Conversion", 0, 100, 95), sliderInput("ngs_ident", "Min Identity", 0, 100, 90),
                     
                     hr(),
@@ -1851,7 +1887,7 @@ server <- function(input, output, session) {
     if (is.na(min_count) || min_count < 1L) min_count <- 1L
     workers <- suppressWarnings(as.integer(input$ngs_workers))
     if (is.na(workers) || workers < 1L) workers <- .panda_workers
-    workers <- min(workers, 8L)
+    workers <- min(workers, 16L)
     
     res_list <- list(); het_list <- list(); sum_list <- list()
     

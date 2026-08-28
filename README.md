@@ -180,7 +180,7 @@ The main analysis options are:
 | `--min-identity` | minimum alignment identity (%) | `90` |
 | `--min-conversion` | minimum bisulfite conversion (%) | `95` |
 | `--min-count` | minimum NGS multiplicity | `1` |
-| `--workers` | parallel alignment workers | `1` |
+| `--workers` | number of parallel alignment workers (OS-independent; backend selected automatically; maximum 16) | `16` |
 | `--read-mode` | `merged` or `unmerged` paired-end handling | `merged` |
 | `--max-reads` | optional computational read limit | all reads |
 | `--max-unique-reads` | optional unique-sequence limit | all unique sequences |
@@ -215,7 +215,7 @@ min_conversion     95
 min_count          1
 read_mode          merged
 max_reads          all reads
-workers            1
+workers            16
 ```
 
 For long projects or batch reruns, the same options can be stored in a JSON,
