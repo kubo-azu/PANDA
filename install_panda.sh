@@ -34,9 +34,32 @@ if [[ ! -x "$SOURCE" ]]; then
   exit 1
 fi
 
-INSTALL_DIR="${PANDA_INSTALL_DIR:-${HOME}/.local/bin}"
+if [[ -n "${PANDA_INSTALL_DIR:-}" ]]; then
+  INSTALL_DIR="${PANDA_INSTALL_DIR}"
+else
+  # Prefer the conventional per-user location.  Some managed macOS
+  # installations contain a root-owned ~/.local/bin; in that case fall back
+  # automatically to ~/bin instead of failing with a cryptic ln error.
+  PREFERRED_DIR="${HOME}/.local/bin"
+  if mkdir -p "$PREFERRED_DIR" 2>/dev/null && [[ -w "$PREFERRED_DIR" ]]; then
+    INSTALL_DIR="$PREFERRED_DIR"
+  else
+    INSTALL_DIR="${HOME}/bin"
+  fi
+fi
 TARGET="${INSTALL_DIR}/panda"
-mkdir -p "$INSTALL_DIR"
+if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+  echo "Error: cannot create installation directory: $INSTALL_DIR" >&2
+  echo "Try a user-writable directory, for example:" >&2
+  echo "  PANDA_INSTALL_DIR=\"\$HOME/bin\" ./install_panda.sh" >&2
+  exit 1
+fi
+if [[ ! -w "$INSTALL_DIR" ]]; then
+  echo "Error: installation directory is not writable: $INSTALL_DIR" >&2
+  echo "Try a user-writable directory, for example:" >&2
+  echo "  PANDA_INSTALL_DIR=\"\$HOME/bin\" ./install_panda.sh" >&2
+  exit 1
+fi
 
 if [[ -e "$TARGET" || -L "$TARGET" ]]; then
   if [[ "$force" -ne 1 ]]; then
@@ -53,6 +76,7 @@ echo "Installed PANDA command: $TARGET"
 if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
   echo "Add this directory to PATH, for example:"
   echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+  echo "Then run: panda --help"
 else
   echo "Try: panda --help"
 fi

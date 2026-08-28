@@ -19,6 +19,6 @@ repository root:
 renv::install("./PANDAcore", rebuild = TRUE)
 ```
 
-The public entry points are listed in `PANDAcore/NAMESPACE`. The CLI scripts
-load this package through the project environment; end users normally do not
-need to install `PANDAcore` separately.
+The public entry points are listed in `PANDAcore/NAMESPACE`. The CLI and the
+local Shiny application load this package through the project environment;
+install it once from the repository root before running either interface.
