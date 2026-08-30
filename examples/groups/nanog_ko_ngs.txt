@@ -1,0 +1,3 @@
+NGS_Nanog_KO_Rep1
+NGS_Nanog_KO_Rep2
+NGS_Nanog_KO_Rep3

@@ -477,186 +477,15 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
   res
 }
 
-.panda_weighted_qfdrp <- function(meth_mat, weights, min_shared_cpg = 1L) {
-  n <- nrow(meth_mat)
-  if (n < 2L) return(0)
-  weights <- as.numeric(weights)
-  weights[is.na(weights) | weights < 1] <- 1
-  masks <- apply(!is.na(meth_mat), 1L, paste0, collapse = "")
-  groups <- split(seq_len(n), masks)
-  q_sum <- 0; q_den <- 0
-  for (aa in seq_along(groups)) {
-    ia <- groups[[aa]]; xa <- meth_mat[ia, , drop = FALSE]; wa <- weights[ia]
-    shared_self <- !is.na(meth_mat[ia[[1L]], ]); k_self <- sum(shared_self)
-    if (k_self >= min_shared_cpg && length(ia) > 1L) {
-      total_a <- sum(wa)
-      meth_a <- colSums(xa[, shared_self, drop = FALSE] * wa)
-      q_sum <- q_sum + sum(meth_a * (total_a - meth_a)) / k_self
-      q_den <- q_den + (total_a^2 - sum(wa^2)) / 2
-    }
-    if (aa == length(groups)) next
-    for (bb in (aa + 1L):length(groups)) {
-      ib <- groups[[bb]]; xb <- meth_mat[ib, , drop = FALSE]; wb <- weights[ib]
-      shared <- !is.na(meth_mat[ia[[1L]], ]) & !is.na(meth_mat[ib[[1L]], ])
-      k_shared <- sum(shared)
-      if (k_shared < min_shared_cpg) next
-      total_a <- sum(wa); total_b <- sum(wb)
-      meth_a <- colSums(xa[, shared, drop = FALSE] * wa)
-      meth_b <- colSums(xb[, shared, drop = FALSE] * wb)
-      q_sum <- q_sum + sum(meth_a * (total_b - meth_b) +
-                             (total_a - meth_a) * meth_b) / k_shared
-      q_den <- q_den + total_a * total_b
-    }
-  }
-  if (q_den > 0) q_sum / q_den else 0
+# Keep the GUI and CLI on the same, versioned computational implementation.
+# This thin wrapper avoids a second copy of the scientific calculations in the
+# Shiny application while preserving the existing local function calls.
+calculate_heterogeneity <- function(...) {
+  PANDAcore::calculate_heterogeneity(...)
 }
 
-calculate_heterogeneity <- function(res_obj, min_shared_cpg = 1L,
-                                    min_window_coverage = 1L,
-                                    cluster_method = "kmeans",
-                                    k = 2L,
-                                    seed = 11L) {
-  df_long <- res_obj$long_data
-  cpg_sites <- res_obj$genome_info$cpg_pos
-  empty_scores <- data.frame(
-    Metric = c("Amplicon PDR", "Window Epipolymorphism", "Amplicon qFDRP"),
-    Value = c(0, 0, 0)
-  )
-  if (is.null(df_long) || nrow(df_long) == 0 || length(cpg_sites) == 0)
-    return(list(scores = empty_scores, meth_mat = matrix(NA),
-                clusters = NULL, pdr_by_cpg = data.frame(),
-                epipolymorphism_by_window = data.frame(),
-                qfdrp_by_cpg = data.frame()))
-  
-  ## One row per dereplicated molecule and an explicit abundance column.
-  ## Sanger rows have Count=1; NGS rows retain their dereplication count.
-  if (!"Count" %in% names(df_long)) df_long$Count <- 1L
-  df_long$Count[is.na(df_long$Count) | df_long$Count < 1] <- 1L
-  molecule_counts <- df_long %>%
-    distinct(ReadID, Count) %>%
-    group_by(ReadID) %>% summarise(Count = max(Count), .groups = "drop")
-  meth_mat <- df_long %>%
-    select(ReadID, Position, Methylation) %>%
-    distinct(ReadID, Position, .keep_all = TRUE) %>%
-    pivot_wider(names_from = Position, values_from = Methylation) %>%
-    column_to_rownames("ReadID")
-  miss <- setdiff(as.character(cpg_sites), colnames(meth_mat))
-  if (length(miss) > 0) for (cc in miss) meth_mat[[cc]] <- NA_real_
-  meth_mat <- meth_mat[, as.character(cpg_sites), drop = FALSE]
-  molecule_counts <- molecule_counts[match(rownames(meth_mat), molecule_counts$ReadID), ]
-  molecule_counts$Count[is.na(molecule_counts$Count)] <- 1L
-  weights <- molecule_counts$Count
-  
-  ## Amplicon-level PDR: the same discordance concept as the reference,
-  ## aggregated over molecules that contain at least four observed CpGs.
-  observed_n <- rowSums(!is.na(meth_mat))
-  discordant <- apply(meth_mat, 1, function(x) {
-    x <- x[!is.na(x)]
-    length(x) >= 4L && length(unique(x)) > 1L
-  })
-  eligible <- observed_n >= 4L
-  pdr_score <- if (any(eligible))
-    100 * sum(weights[eligible] * discordant[eligible]) / sum(weights[eligible]) else 0
-  
-  ## Epipolymorphism is calculated independently for each consecutive
-  ## four-CpG window, then summarized across windows. Counts are weighted.
-  epi_rows <- list()
-  if (length(cpg_sites) >= 4L) {
-    for (ww in seq_len(length(cpg_sites) - 3L)) {
-      x <- meth_mat[, ww:(ww + 3L), drop = FALSE]
-      keep <- complete.cases(x)
-      if (sum(weights[keep]) < min_window_coverage || !any(keep)) next
-      patterns <- apply(x[keep, , drop = FALSE], 1, paste0, collapse = "")
-      tab <- tapply(weights[keep], patterns, sum)
-      pk <- tab / sum(tab)
-      epi_rows[[length(epi_rows) + 1L]] <- data.frame(
-        Window = ww, Start_CpG = cpg_sites[ww], End_CpG = cpg_sites[ww + 3L],
-        Coverage = sum(weights[keep]), Epipolymorphism = 1 - sum(pk^2)
-      )
-    }
-  }
-  epi_df <- if (length(epi_rows)) bind_rows(epi_rows) else data.frame()
-  epipoly_score <- if (nrow(epi_df)) mean(epi_df$Epipolymorphism) else 0
-  
-  ## Amplicon qFDRP: abundance-weighted normalized Hamming distances
-  ## over the CpGs shared by each pair of dereplicated molecules. This is
-  ## intentionally region-level for long-range amplicon phasing.
-  qfdrp_score <- .panda_weighted_qfdrp(
-    meth_mat, weights, min_shared_cpg = min_shared_cpg
-  )
-
-  ## Clustering is used only to order the ASM heatmap; it does not alter the
-  ## three heterogeneity metrics. Missing CpGs are column-mean imputed solely
-  ## for this visualization step.
-  clusters <- NULL
-  cluster_method <- tolower(as.character(cluster_method[[1L]]))
-  k <- suppressWarnings(as.integer(k[[1L]])); if (is.na(k) || k < 2L) k <- 2L
-  seed <- suppressWarnings(as.integer(seed[[1L]])); if (is.na(seed)) seed <- 11L
-  if (identical(cluster_method, "kmeans") && nrow(meth_mat) >= k) {
-    cluster_mat <- meth_mat
-    for (jj in seq_len(ncol(cluster_mat))) {
-      vv <- cluster_mat[, jj]; mu <- mean(vv, na.rm = TRUE)
-      if (!is.finite(mu)) mu <- 0.5
-      vv[is.na(vv)] <- mu; cluster_mat[, jj] <- vv
-    }
-    if (nrow(unique(cluster_mat)) >= k) {
-      had_seed <- exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)
-      if (had_seed) old_seed <- get(".Random.seed", envir = .GlobalEnv)
-      set.seed(seed)
-      km <- stats::kmeans(cluster_mat, centers = k, nstart = 10L)
-      if (had_seed) assign(".Random.seed", old_seed, envir = .GlobalEnv)
-      else if (exists(".Random.seed", envir = .GlobalEnv, inherits = FALSE)) rm(".Random.seed", envir = .GlobalEnv)
-      clusters <- stats::setNames(as.integer(km$cluster), rownames(meth_mat))
-    }
-  }
-  
-  ## Optional per-CpG PDR/qFDRP tables for QC and auditability.
-  pdr_by_cpg <- lapply(seq_along(cpg_sites), function(cc) {
-    keep <- !is.na(meth_mat[, cc]) & eligible
-    vals <- meth_mat[keep, , drop = FALSE]
-    disc <- if (nrow(vals)) apply(vals, 1, function(x) {
-      x <- x[!is.na(x)]; length(x) >= 4L && length(unique(x)) > 1L
-    }) else logical()
-    data.frame(Position = cpg_sites[cc], Coverage = sum(weights[keep]),
-               PDR = if (any(keep)) sum(weights[keep] * disc) / sum(weights[keep]) else NA_real_)
-  }) %>% bind_rows()
-  list(
-    scores = data.frame(Metric = c("Amplicon PDR", "Window Epipolymorphism", "Amplicon qFDRP"),
-                        Value = c(pdr_score, epipoly_score, qfdrp_score)),
-    meth_mat = meth_mat, clusters = clusters,
-    pdr_by_cpg = pdr_by_cpg, epipolymorphism_by_window = epi_df,
-    qfdrp_by_cpg = data.frame()
-  )
-}
-
-calculate_quma_stats <- function(res_obj, mode = "Sanger") {
-  df_long <- res_obj$long_data; df_summary <- res_obj$read_summary %>% filter(!str_detect(Pattern, "^excluded"))
-  cpg_sites <- res_obj$genome_info$cpg_pos
-  if(nrow(df_summary) == 0) return(list(overall=0, sd_cpg=0, se_cpg=0, sd_seq=0, se_seq=0, cpg_table=data.frame()))
-  
-  if (mode == "NGS") {
-    parsed_count <- suppressWarnings(as.integer(str_extract(
-      df_long$ReadID, "(?<=Count)\\d+"
-    )))
-    parsed_count[is.na(parsed_count) | parsed_count < 1L] <- 1L
-    df_long <- df_long %>% mutate(Count = parsed_count)
-    overall_meth <- sum(df_long$Methylation * df_long$Count, na.rm = TRUE) /
-      sum(df_long$Count, na.rm = TRUE) * 100
-    cpg_stats <- df_long %>% group_by(Position) %>% summarise(
-      Num_Meth = sum(Methylation * Count, na.rm = TRUE),
-      Num_Total = sum(Count, na.rm = TRUE),
-      Meth_Pct = Num_Meth / Num_Total * 100,
-      .groups = "drop"
-    )
-  } else {
-    overall_meth <- mean(df_long$Methylation) * 100
-    cpg_stats <- df_long %>% group_by(Position) %>% summarise(Num_Meth=sum(Methylation), Num_Total=n(), Meth_Pct=mean(Methylation)*100)
-  }
-  
-  sd_cpg <- sd(cpg_stats$Meth_Pct, na.rm=T); se_cpg <- sd_cpg/sqrt(nrow(cpg_stats))
-  sd_seq <- sd(df_summary$Meth_Pct, na.rm=T); se_seq <- sd_seq/sqrt(nrow(df_summary))
-  full_cpg_stats <- data.frame(Position = cpg_sites) %>% left_join(cpg_stats, by = "Position") %>% replace_na(list(Num_Meth = 0, Num_Total = 0, Meth_Pct = NA))
-  return(list(overall=overall_meth, sd_cpg=sd_cpg, se_cpg=se_cpg, sd_seq=sd_seq, se_seq=se_seq, cpg_table=full_cpg_stats))
+calculate_quma_stats <- function(...) {
+  PANDAcore::calculate_quma_stats(...)
 }
 
 analyze_group_comparison <- function(res_list_A, res_list_B, genome_seq, g1_name="Group 1", g2_name="Group 2") {
@@ -771,6 +600,13 @@ analyze_group_comparison <- function(res_list_A, res_list_B, genome_seq, g1_name
                                           N = c(length(oa), length(ob)),
                                           Mean = c(mean(oa), mean(ob))),
               summary = sum_df, g1_name=g1_name, g2_name=g2_name))
+}
+
+# Ensure any remaining local call sites use the shared, versioned engine.  The
+# legacy function body above is retained temporarily only to keep this
+# single-file Shiny application easy to diff against pre-1.0 versions.
+analyze_group_comparison <- function(...) {
+  PANDAcore::analyze_group_comparison(...)
 }
 
 # ==============================================================================
@@ -904,11 +740,11 @@ create_lollipop_plot <- function(long_data, point_size = 4, text_size = 14, top_
       geom_text(aes(label = paste0("#", Count_Rank, " (n=", Count, ")")),
                 hjust = -0.1, size = 3.9) +
       theme_void(base_size = 13) + 
-      theme(plot.margin = margin(l = 10, r = 45, t = 10, b = 10)) +
+      theme(plot.margin = margin(l = 10, r = 16, t = 10, b = 10)) +
       coord_cartesian(clip = "off") +
-      scale_x_continuous(expand = expansion(mult = c(0, 0.65))) +
+      scale_x_continuous(expand = expansion(mult = c(0, 1.05))) +
       labs(title = "Read Count")
-    return(p1 + p2 + plot_layout(widths = c(3, 1.15)))
+    return(p1 + p2 + plot_layout(widths = c(3, 1.35)))
   } else {
     return(p1)
   }
@@ -942,18 +778,20 @@ create_asm_heatmap <- function(het_res) {
     labs(fill="Meth", y="Reads (Clustered)", x="CpG Position (Sequential)")
 }
 
-create_comp_barplot <- function(summary_df) {
+create_comp_barplot <- function(summary_df, sample_values = NULL) {
   if(is.null(summary_df) || nrow(summary_df)==0) return(NULL)
-  if (!"SD" %in% names(summary_df)) summary_df$SD <- 0
+  if (!"SD" %in% names(summary_df)) summary_df$SD <- NA_real_
+  summary_df$Label_Y <- ifelse(summary_df$Mean > 92, summary_df$Mean - 4, summary_df$Mean + 4)
   group_levels <- unique(as.character(summary_df$Group))
   palette_values <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7")
   group_cols <- setNames(rep(palette_values, length.out = length(group_levels)), group_levels)
-  ggplot(summary_df, aes(x = Group, y = Mean, fill = Group)) +
+  p <- ggplot(summary_df, aes(x = Group, y = Mean, fill = Group)) +
     geom_col(width = 0.62, show.legend = FALSE) +
     geom_errorbar(aes(ymin = pmax(0, Mean - SD), ymax = pmin(100, Mean + SD)),
-                  width = 0.14, linewidth = 0.5) +
-    geom_text(aes(label = formatC(Mean, format = "fg", digits = 3)),
-              vjust = -0.45, size = 4) +
+                  width = 0.14, linewidth = 0.5, na.rm = TRUE) +
+    geom_text(aes(y = Label_Y,
+                  label = formatC(Mean, format = "fg", digits = 3)),
+              vjust = 0.5, size = 4) +
     scale_fill_manual(values = group_cols, drop = FALSE) +
     scale_y_continuous(breaks = seq(0, 100, 20),
                        expand = expansion(mult = c(0, 0.08))) +
@@ -966,14 +804,27 @@ create_comp_barplot <- function(summary_df) {
           axis.title = element_text(size = 14),
           plot.margin = margin(12, 12, 18, 12)) +
     labs(y = "Mean methylation (%)", x = NULL,
-         title = "Global methylation comparison")
+         title = "Global methylation comparison",
+         subtitle = "Bars: sample means; error bars: SD; points: samples")
+  if (!is.null(sample_values) && nrow(sample_values)) {
+    sample_values$Group <- factor(sample_values$Group, levels = group_levels)
+    p <- p + geom_point(
+      data = sample_values,
+      aes(x = Group, y = Overall_Methylation),
+      inherit.aes = FALSE,
+      position = position_jitter(width = 0.07, height = 0, seed = 11),
+      shape = 21, size = 3, stroke = 0.7,
+      fill = "white", colour = "black"
+    )
+  }
+  p
 }
 
 create_diff_plot <- function(site_table, g1_name="Group 1", g2_name="Group 2") {
   if(is.null(site_table)) return(NULL)
   df <- site_table %>% mutate(Delta = Pct_1 - Pct_2)
   ggplot(df, aes(x=factor(Position), y=Delta, fill=as.character(Delta>0))) + 
-    geom_bar(stat="identity") + 
+    geom_bar(stat="identity", na.rm = TRUE) +
     scale_fill_manual(
       name = "",
       values = c("TRUE"="firebrick", "FALSE"="steelblue"), 
@@ -1203,16 +1054,16 @@ ui <- page_navbar(
                                             hr(),
                                             
                                             h5(icon("scale-balanced"), "3. Group Comparison"),
-                                            p("Statistical comparison (Difference Plot, sample-level comparison, and pooled molecule-level Fisher's Exact as an audit fallback) between two groups across Sanger or NGS batches. When at least two samples are available per group, sample-level tests are used to avoid treating sequencing molecules as biological replicates. ", 
-                                              strong("P-values for single-CpG comparisons are adjusted for multiple testing using the Benjamini-Hochberg (FDR) method."))
+                                            p("Statistical comparison between two groups across Sanger or NGS batches. Summary bars, SD, and points are calculated from biological-sample values. The overall Wilcoxon test is reported only when both groups contain at least two estimable samples. At each CpG, a sample-level Welch test is used when replicate coverage permits it; otherwise a pooled read-level Fisher test is retained as a descriptive fallback and identified in the output table. ",
+                                              strong("Single-CpG P-values are adjusted using the Benjamini-Hochberg method, and pooled read-level tests must not be interpreted as replicated biological inference."))
                                   ),
                                   
                                   nav_panel("Heterogeneity Metrics",
-                                            p("PANDA reports abundance-weighted, amplicon-adapted heterogeneity metrics based on Scherer et al. (Nucleic Acids Research, 2020). Sanger clones have Count = 1; dereplicated NGS molecules retain their read counts."),
+                                            p("PANDA reports amplicon-adapted heterogeneity metrics based on Scherer et al. (Nucleic Acids Research, 2020). Sanger clones have Count = 1; dereplicated NGS sequence variants retain observed read-count weights. These weights are not interpreted as UMI-corrected molecule counts."),
                                             hr(),
                                             
                                             h5(strong("Amplicon PDR (Proportion of Discordant Reads):")),
-                                            p("The abundance-weighted percentage of molecules containing at least four observed CpGs and both methylated and unmethylated states. It summarizes within-molecule discordance across the target amplicon."),
+                                            p("The read-abundance-weighted percentage of reads or clones containing at least four observed CpGs and both methylated and unmethylated states. It summarizes within-read discordance across the target amplicon."),
                                             hr(),
                                             
                                             h5(strong("Window Epipolymorphism:")),
@@ -1220,7 +1071,9 @@ ui <- page_navbar(
                                             hr(),
                                             
                                             h5(strong("Amplicon qFDRP:")),
-                                            p("Measures the abundance-weighted normalized Hamming distance between molecule pairs over CpGs observed in both molecules. It is an amplicon-level adaptation for long-range phased patterns; a high value indicates diverse molecule-level methylation states.")
+                                            p("Measures the read-abundance-weighted normalized Hamming distance between retained-read pairs over CpGs observed in both reads. Same-variant pairs are included with distance zero. It is an amplicon-level adaptation for long-range phased patterns; a high value indicates diverse read-level methylation states. Pairs sharing fewer than the selected minimum number of CpGs are excluded and reported in the diagnostics."),
+                                            div(class="alert alert-secondary",
+                                                "If no records, windows, or pairs meet an eligibility rule, PANDA reports NA with a diagnostic status rather than reporting zero heterogeneity. Eligibility thresholds can be changed in the analysis sidebar and are saved with the results.")
                                   )
                                 )
                 ),
@@ -1303,7 +1156,11 @@ ui <- page_navbar(
                                      actionButton("run_sanger_comp", "Run Comparison", class="btn-success w-100"),
                                      br(), br(),
                                      uiOutput("ui_dl_sanger_comp")
-                    )
+                    ),
+                    hr(),
+                    h5("Heterogeneity eligibility"),
+                    numericInput("sanger_min_shared_cpg", "Minimum shared CpGs for qFDRP", value = 4, min = 1, step = 1),
+                    numericInput("sanger_min_window_coverage", "Minimum clone coverage per 4-CpG window", value = 2, min = 1, step = 1)
                 ),
                 hr(), actionButton("reset_sanger", "Reset All", class="btn-warning w-100", icon=icon("refresh")), br()
               ),
@@ -1363,6 +1220,8 @@ ui <- page_navbar(
                     selectInput("ngs_type", "Type", choices = c("FASTQ (fastq/fq.gz)" = "fastq", "FASTA" = "fasta")),
                     sliderInput("ngs_top_n", "Top N for lollipop plot", 10, 100, 30),
                     numericInput("ngs_min_count", "Minimum read count for metrics", value = 1, min = 1, step = 1),
+                    numericInput("ngs_min_shared_cpg", "Minimum shared CpGs for qFDRP", value = 4, min = 1, step = 1),
+                    numericInput("ngs_min_window_coverage", "Minimum retained-read coverage per 4-CpG window", value = 2, min = 1, step = 1),
                     numericInput("ngs_workers", "Alignment workers (parallel)", value = min(.panda_workers, 16L), min = 1, max = 16, step = 1),
                     sliderInput("ngs_conv", "Min Conversion", 0, 100, 95), sliderInput("ngs_ident", "Min Identity", 0, 100, 90),
                     
@@ -1678,7 +1537,13 @@ server <- function(input, output, session) {
         incProgress(0.6, detail = "Aligning..."); res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE) 
         if(isTRUE(res$was_flipped)) showNotification("Reference automatically flipped to Reverse Complement.", type="warning", duration=10)
         
-        sanger_single_res(res); sanger_single_het(calculate_heterogeneity(res)); incProgress(1, detail = "Done!")
+        sanger_single_res(res)
+        sanger_single_het(calculate_heterogeneity(
+          res,
+          min_shared_cpg = input$sanger_min_shared_cpg,
+          min_window_coverage = input$sanger_min_window_coverage
+        ))
+        incProgress(1, detail = "Done!")
         
       }, error = function(e) showNotification(e$message, type="error", duration = NULL))
     })
@@ -1687,7 +1552,7 @@ server <- function(input, output, session) {
   output$sanger_summary <- renderPrint({ req(sanger_single_res()); stats <- calculate_quma_stats(sanger_single_res(), "Sanger"); cat(sprintf("Overall Methylation: %.1f%%\n", stats$overall)) })
   output$sanger_plot <- renderPlot({ req(sanger_single_res()); create_lollipop_plot(sanger_single_res()$long_data) })
   
-  output$sanger_het_table <- renderDT({ req(sanger_single_het()); datatable(sanger_single_het()$scores, options=list(dom='t'), rownames=FALSE) %>% formatRound(2, 3) })
+  output$sanger_het_table <- renderDT({ req(sanger_single_het()); datatable(sanger_single_het()$scores, options=list(dom='t', scrollX=TRUE), rownames=FALSE) %>% formatRound(2, 3) })
   
   output$sanger_asm_plot <- renderPlot({ req(sanger_single_het()); create_asm_heatmap(sanger_single_het()) })
   output$sanger_cpg_table <- renderDT({ req(sanger_single_res()); datatable(calculate_quma_stats(sanger_single_res(), "Sanger")$cpg_table, rownames=FALSE) %>% formatRound("Meth_Pct", 1) })
@@ -1730,7 +1595,12 @@ server <- function(input, output, session) {
             res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE) 
             if(!is.null(res)) { 
               nm <- files$name[i]; res_list[[nm]] <- res
-              het <- calculate_heterogeneity(res); het_list[[nm]] <- het
+              het <- calculate_heterogeneity(
+                res,
+                min_shared_cpg = input$sanger_min_shared_cpg,
+                min_window_coverage = input$sanger_min_window_coverage
+              )
+              het_list[[nm]] <- het
               stats <- calculate_quma_stats(res, "Sanger")
               
               sum_list[[length(sum_list)+1]] <- data.frame(
@@ -1771,7 +1641,7 @@ server <- function(input, output, session) {
   get_sanger_multi_sel <- reactive({ req(sanger_multi_batch(), input$sanger_multi_view_sample); list(res = sanger_multi_batch()$details[[input$sanger_multi_view_sample]], het = sanger_multi_batch()$hets[[input$sanger_multi_view_sample]]) })
   output$sanger_multi_detail_lollipop <- renderPlot({ req(get_sanger_multi_sel()); create_lollipop_plot(get_sanger_multi_sel()$res$long_data) })
   
-  output$sanger_multi_detail_het_table <- renderDT({ datatable(get_sanger_multi_sel()$het$scores, options=list(dom='t'), rownames=FALSE) %>% formatRound(2, 3) })
+  output$sanger_multi_detail_het_table <- renderDT({ datatable(get_sanger_multi_sel()$het$scores, options=list(dom='t', scrollX=TRUE), rownames=FALSE) %>% formatRound(2, 3) })
   
   output$sanger_multi_detail_asm_plot <- renderPlot({ req(get_sanger_multi_sel()); create_asm_heatmap(get_sanger_multi_sel()$het) })
   output$sanger_multi_detail_summary <- renderPrint({ stats <- calculate_quma_stats(get_sanger_multi_sel()$res, "Sanger"); cat(sprintf("Overall Methylation: %.1f%%\n", stats$overall)) })
@@ -1793,7 +1663,7 @@ server <- function(input, output, session) {
     }
     
     withProgress(message = 'Comparing...', value = 0.5, { 
-      sanger_multi_comp(analyze_group_comparison(
+      sanger_multi_comp(PANDAcore::analyze_group_comparison(
         sanger_multi_batch()$details[input$sanger_grp1], 
         sanger_multi_batch()$details[input$sanger_grp2], 
         sanger_multi_batch()$genome,
@@ -1804,19 +1674,29 @@ server <- function(input, output, session) {
   })
   
   output$sanger_comp_diff <- renderPlot({ req(sanger_multi_comp()); create_diff_plot(sanger_multi_comp()$site_table, sanger_multi_comp()$g1_name, sanger_multi_comp()$g2_name) })
-  output$sanger_comp_bar <- renderPlot({ req(sanger_multi_comp()); create_comp_barplot(sanger_multi_comp()$summary) })
+  output$sanger_comp_bar <- renderPlot({
+    req(sanger_multi_comp())
+    create_comp_barplot(
+      sanger_multi_comp()$sample_summary,
+      sanger_multi_comp()$sample_values
+    )
+  })
   output$sanger_comp_stat <- renderPrint({ 
     req(sanger_multi_comp())
     s <- sanger_multi_comp()$summary
-    cat(sprintf("%s Mean: %.1f%%, %s Mean: %.1f%%\nMann-Whitney P-val: %g", 
-                s$Group[1], s$Mean[1], s$Group[2], s$Mean[2], sanger_multi_comp()$u_test_p)) 
+    p_value <- sanger_multi_comp()$u_test_p
+    p_text <- if (is.finite(p_value)) format(p_value, digits = 4) else "not estimable"
+    cat(sprintf(
+      "%s Mean: %.1f%%, %s Mean: %.1f%%\nSample-level Wilcoxon P-value: %s",
+      s$Group[1], s$Mean[1], s$Group[2], s$Mean[2], p_text
+    ))
   })
   
   output$sanger_comp_site <- renderDT({ 
     req(sanger_multi_comp())
     comp <- sanger_multi_comp()
     df <- comp$site_table
-    colnames(df) <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
+    colnames(df)[seq_len(9L)] <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
     datatable(df, rownames=FALSE) %>% formatRound(c(4, 7), 1) %>% formatSignif(c(8, 9), 3) 
   })
   
@@ -2041,7 +1921,11 @@ server <- function(input, output, session) {
               nm <- files$name[i]
               display_res$metrics <- metrics_res
               res_list[[nm]] <- display_res
-              het_list[[nm]] <- calculate_heterogeneity(metrics_res)
+              het_list[[nm]] <- calculate_heterogeneity(
+                metrics_res,
+                min_shared_cpg = input$ngs_min_shared_cpg,
+                min_window_coverage = input$ngs_min_window_coverage
+              )
               stats <- calculate_quma_stats(metrics_res, "NGS")
               
               real_total_reads <- sum(metrics_res$read_summary$Count)
@@ -2157,7 +2041,7 @@ server <- function(input, output, session) {
     create_meth_histogram(get_ngs_sel()$res$long_data)
   }, res = 110)
   
-  output$ngs_detail_het <- renderDT({ datatable(get_ngs_sel()$het$scores, options=list(dom='t'), rownames=FALSE) %>% formatRound(2, 3) })
+  output$ngs_detail_het <- renderDT({ datatable(get_ngs_sel()$het$scores, options=list(dom='t', scrollX=TRUE), rownames=FALSE) %>% formatRound(2, 3) })
   
   output$ngs_stats_table <- renderDT({ datatable(calculate_quma_stats(get_ngs_sel()$res, "NGS")$cpg_table, rownames=FALSE) %>% formatRound("Meth_Pct", 1) })
   output$ngs_read_qc <- renderDT({ datatable(get_ngs_sel()$res$read_summary, options=list(scrollX=T), rownames=FALSE) })
@@ -2178,7 +2062,7 @@ server <- function(input, output, session) {
     }
     
     withProgress(message = 'Comparing...', value = 0.5, {
-      ngs_comp_results(analyze_group_comparison(
+      ngs_comp_results(PANDAcore::analyze_group_comparison(
         ngs_batch_results()$details[input$ngs_grp1], 
         ngs_batch_results()$details[input$ngs_grp2], 
         ngs_batch_results()$genome,
@@ -2189,7 +2073,13 @@ server <- function(input, output, session) {
   })
   
   output$ngs_comp_diff_plot <- renderPlot({ req(ngs_comp_results()); create_diff_plot(ngs_comp_results()$site_table, ngs_comp_results()$g1_name, ngs_comp_results()$g2_name) })
-  output$ngs_comp_bar_plot <- renderPlot({ req(ngs_comp_results()); create_comp_barplot(ngs_comp_results()$summary) })
+  output$ngs_comp_bar_plot <- renderPlot({
+    req(ngs_comp_results())
+    create_comp_barplot(
+      ngs_comp_results()$sample_summary,
+      ngs_comp_results()$sample_values
+    )
+  })
   
   observeEvent(input$ngs_comp_diff_click, {
     showModal(modalDialog(
@@ -2218,15 +2108,25 @@ server <- function(input, output, session) {
   })
   output$ngs_comp_bar_modal <- renderPlot({
     req(ngs_comp_results())
-    create_comp_barplot(ngs_comp_results()$summary)
+    create_comp_barplot(
+      ngs_comp_results()$sample_summary,
+      ngs_comp_results()$sample_values
+    )
   }, res = 110)
-  output$ngs_comp_stat_txt <- renderPrint({ req(ngs_comp_results()); cat("P-value:", ngs_comp_results()$u_test_p) })
+  output$ngs_comp_stat_txt <- renderPrint({
+    req(ngs_comp_results())
+    p_value <- ngs_comp_results()$u_test_p
+    cat(
+      "Sample-level Wilcoxon P-value:",
+      if (is.finite(p_value)) format(p_value, digits = 4) else "not estimable"
+    )
+  })
   
   output$ngs_comp_site_table <- renderDT({ 
     req(ngs_comp_results())
     comp <- ngs_comp_results()
     df <- comp$site_table
-    colnames(df) <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
+    colnames(df)[seq_len(9L)] <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
     datatable(df, rownames=FALSE) %>% formatRound(c(4, 7), 1) %>% formatSignif(c(8, 9), 3) 
   })
   
@@ -2280,10 +2180,15 @@ server <- function(input, output, session) {
       owd <- setwd(tempdir())
       on.exit(setwd(owd))
       
-      fs <- c("Summary.csv", "LongData.csv", "Heterogeneity.csv", "CpG_Stats.csv")
+      fs <- c("Summary.csv", "LongData.csv", "Heterogeneity.csv", "PDR_by_CpG.csv",
+              "Epipolymorphism_Windows.csv", "qFDRP_Shared_CpG_Distribution.csv",
+              "CpG_Stats.csv")
       write.csv(sanger_single_res()$read_summary, "Summary.csv", row.names=F)
       write.csv(sanger_single_res()$long_data, "LongData.csv", row.names=F)
       write.csv(sanger_single_het()$scores, "Heterogeneity.csv", row.names=F)
+      write.csv(sanger_single_het()$pdr_by_cpg, "PDR_by_CpG.csv", row.names=F)
+      write.csv(sanger_single_het()$epipolymorphism_by_window, "Epipolymorphism_Windows.csv", row.names=F)
+      write.csv(sanger_single_het()$qfdrp_shared_cpg_distribution, "qFDRP_Shared_CpG_Distribution.csv", row.names=F)
       write.csv(calculate_quma_stats(sanger_single_res(), "Sanger")$cpg_table, "CpG_Stats.csv", row.names=F)
       
       p_lol <- create_lollipop_plot(sanger_single_res()$long_data)
@@ -2332,6 +2237,9 @@ server <- function(input, output, session) {
             write.csv(res$read_summary, file.path(plot_dir, paste0(safe_nm, "_Reads.csv")), row.names=F)
             write.csv(stats$cpg_table, file.path(plot_dir, paste0(safe_nm, "_CpG_Stats.csv")), row.names=F)
             write.csv(het$scores, file.path(plot_dir, paste0(safe_nm, "_Heterogeneity.csv")), row.names=F)
+            write.csv(het$pdr_by_cpg, file.path(plot_dir, paste0(safe_nm, "_PDR_by_CpG.csv")), row.names=F)
+            write.csv(het$epipolymorphism_by_window, file.path(plot_dir, paste0(safe_nm, "_Epipolymorphism_Windows.csv")), row.names=F)
+            write.csv(het$qfdrp_shared_cpg_distribution, file.path(plot_dir, paste0(safe_nm, "_qFDRP_Shared_CpG_Distribution.csv")), row.names=F)
             
             if(!is.null(res$alignments$pairwise)) {
               writeLines(unlist(res$alignments$pairwise), file.path(plot_dir, paste0(safe_nm, "_Alignments.txt")))
@@ -2371,16 +2279,16 @@ server <- function(input, output, session) {
       fs <- c()
       
       df <- comp$site_table
-      colnames(df) <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
+      colnames(df)[seq_len(9L)] <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
       write.csv(df, "Comparison_Sites.csv", row.names=F)
       fs <- c(fs, "Comparison_Sites.csv")
       
       p1 <- create_diff_plot(comp$site_table, comp$g1_name, comp$g2_name)
       if(!is.null(p1)) { ggsave("Comp_Diff_Plot.pdf", p1, width=8, height=6); fs <- c(fs, "Comp_Diff_Plot.pdf") }
       
-      p2 <- create_comp_barplot(comp$summary)
+      p2 <- create_comp_barplot(comp$sample_summary, comp$sample_values)
       if(!is.null(p2)) {
-        ggsave("Comp_Mean_Bar.pdf", p2, width=6.5, height=5.5)
+        ggsave("Comp_Mean_Bar.pdf", p2, width=7.2, height=5.5)
         fs <- c(fs, "Comp_Mean_Bar.pdf")
       }
       
@@ -2424,15 +2332,19 @@ server <- function(input, output, session) {
             write.csv(res$read_summary, file.path(plot_dir, paste0(safe_nm, "_Reads.csv")), row.names=F)
             write.csv(stats$cpg_table, file.path(plot_dir, paste0(safe_nm, "_CpG_Stats.csv")), row.names=F)
             write.csv(het$scores, file.path(plot_dir, paste0(safe_nm, "_Heterogeneity.csv")), row.names=F)
+            write.csv(het$pdr_by_cpg, file.path(plot_dir, paste0(safe_nm, "_PDR_by_CpG.csv")), row.names=F)
+            write.csv(het$epipolymorphism_by_window, file.path(plot_dir, paste0(safe_nm, "_Epipolymorphism_Windows.csv")), row.names=F)
+            write.csv(het$qfdrp_shared_cpg_distribution, file.path(plot_dir, paste0(safe_nm, "_qFDRP_Shared_CpG_Distribution.csv")), row.names=F)
             
             if(!is.null(res$alignments$pairwise)) {
               writeLines(unlist(res$alignments$pairwise), file.path(plot_dir, paste0(safe_nm, "_Alignments.txt")))
             }
             
             n_reads <- length(unique(res$long_data$ReadID))
-            calc_h <- 4 + (n_reads * 0.15)
-            pt_size <- if(n_reads > 30) 3 else 4
-            txt_size <- if(n_reads > 30) 10 else 14
+            displayed_reads <- min(30L, n_reads)
+            calc_h <- max(7.2, min(10, 4 + displayed_reads * 0.12))
+            pt_size <- if(displayed_reads > 25) 3 else 4
+            txt_size <- if(displayed_reads > 25) 12 else 14
             
             p1 <- create_meth_histogram(res$long_data)
             if(!is.null(p1)) ggsave(file.path(plot_dir, paste0(safe_nm, "_Histogram.png")), p1, width=8, height=6, dpi=600)
@@ -2444,8 +2356,17 @@ server <- function(input, output, session) {
                      p2, width=13, height=hm_height, dpi=600)
             }
             
-            p3 <- create_lollipop_plot(res$long_data, point_size = pt_size, text_size = txt_size)
-            if(!is.null(p3)) ggsave(file.path(plot_dir, paste0(safe_nm, "_Lollipop.png")), p3, width=8, height=calc_h, limitsize = FALSE, dpi=600)
+            p3 <- create_lollipop_plot(
+              res$long_data, point_size = pt_size, text_size = txt_size,
+              top_n = displayed_reads
+            )
+            if(!is.null(p3)) {
+              ggsave(
+                file.path(plot_dir, paste0(safe_nm, "_Lollipop.png")),
+                p3, width = 14.2, height = calc_h,
+                limitsize = FALSE, dpi = 600
+              )
+            }
             
           }, error = function(e) { message(paste("Skipping NGS sample:", nm, e$message)) })
           
@@ -2471,16 +2392,16 @@ server <- function(input, output, session) {
       fs <- c()
       
       df <- comp$site_table
-      colnames(df) <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
+      colnames(df)[seq_len(9L)] <- c("Position", paste(comp$g1_name, "Meth"), paste(comp$g1_name, "Total"), paste(comp$g1_name, "Pct"), paste(comp$g2_name, "Meth"), paste(comp$g2_name, "Total"), paste(comp$g2_name, "Pct"), "P_Value", "FDR")
       write.csv(df, "NGS_Comparison_Sites.csv", row.names=F)
       fs <- c(fs, "NGS_Comparison_Sites.csv")
       
       p1 <- create_diff_plot(comp$site_table, comp$g1_name, comp$g2_name)
       if(!is.null(p1)) { ggsave("NGS_Comp_Diff.pdf", p1, width=8, height=6); fs <- c(fs, "NGS_Comp_Diff.pdf") }
       
-      p2 <- create_comp_barplot(comp$summary)
+      p2 <- create_comp_barplot(comp$sample_summary, comp$sample_values)
       if(!is.null(p2)) {
-        ggsave("NGS_Comp_Bar.pdf", p2, width=6.5, height=5.5)
+        ggsave("NGS_Comp_Bar.pdf", p2, width=7.2, height=5.5)
         fs <- c(fs, "NGS_Comp_Bar.pdf")
       }
       

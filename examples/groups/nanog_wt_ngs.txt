@@ -1,0 +1,3 @@
+NGS_Nanog_WT_Rep1
+NGS_Nanog_WT_Rep2
+NGS_Nanog_WT_Rep3

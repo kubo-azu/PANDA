@@ -442,6 +442,11 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
     data.frame(ReadID = character(), Strand = character(), Position = integer(),
                Methylation = integer(), stringsAsFactors = FALSE)
   }
+  ## rbind() retains chunk-local row names, which differ between serial and
+  ## parallel execution despite identical content.  Normalize them so output
+  ## bundles are byte-stable across worker counts.
+  rownames(read_summary_df) <- NULL
+  rownames(long_data_df) <- NULL
   pairwise_txt_list <- unlist(lapply(processed_chunks, `[[`, "pairwise"), use.names = FALSE)
   n_excluded <- sum(grepl("^excluded", read_summary_df$Pattern))
   if (nrow(read_summary_df) == 0) return(NULL)

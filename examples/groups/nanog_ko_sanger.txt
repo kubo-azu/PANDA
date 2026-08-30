@@ -1,0 +1,3 @@
+Sanger_Nanog_KO_Rep1
+Sanger_Nanog_KO_Rep2
+Sanger_Nanog_KO_Rep3

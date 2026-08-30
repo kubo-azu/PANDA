@@ -15,6 +15,14 @@ BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$SOURCE")" && pwd)"
 PROJECT_ROOT="$(CDPATH= cd -- "${BIN_DIR}/.." && pwd)"
 R_SCRIPT="${R_PANDA_RSCRIPT:-Rscript}"
 
+# Always activate this repository's renv project, even when `panda` is called
+# from another working directory.  Skipping the site profile also prevents
+# unrelated globally configured packages from loading before renv.  The
+# current working directory is deliberately preserved so user-supplied
+# relative input/output paths retain conventional CLI semantics.
+export R_PROFILE_USER="${PROJECT_ROOT}/.Rprofile"
+R_STARTUP_ARGS=(--no-site-file)
+
 usage() {
   cat <<'EOF'
 PANDA command-line interface
@@ -50,7 +58,7 @@ normalize_analyze_args() {
       --config)
         [[ $# -ge 2 ]] || { echo "--config requires a value." >&2; exit 2; }
         NORMALIZED+=(--config "$2"); config_seen=1; shift 2 ;;
-      --mode|--input|--reference|--reference-target|--output-dir|--min-identity|--min-conversion|--min-count|--workers|--read-mode|--max-reads|--max-unique-reads|--motif-file|--motifs|--ab1-trim-start|--ab1-trim-end|--cluster-method|--k|--seed|-i|-r)
+      --mode|--input|--reference|--reference-target|--output-dir|--min-identity|--min-conversion|--min-count|--min-shared-cpg|--min-window-coverage|--workers|--read-mode|--max-reads|--max-unique-reads|--motif-file|--motifs|--ab1-trim-start|--ab1-trim-end|--cluster-method|--k|--seed|-i|-r)
         [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 2; }
         NORMALIZED+=("$1" "$2"); shift 2 ;;
       --*)
@@ -107,15 +115,15 @@ shift
 case "$command" in
   analyze|analysis|run)
     normalize_analyze_args "$@"
-    exec "$R_SCRIPT" "${PROJECT_ROOT}/cli/panda.R" "${NORMALIZED[@]}"
+    exec "$R_SCRIPT" "${R_STARTUP_ARGS[@]}" "${PROJECT_ROOT}/cli/panda.R" "${NORMALIZED[@]}"
     ;;
   plot|plots)
     normalize_results_args "$@"
-    exec "$R_SCRIPT" "${PROJECT_ROOT}/cli/panda_plot.R" "${NORMALIZED[@]}"
+    exec "$R_SCRIPT" "${R_STARTUP_ARGS[@]}" "${PROJECT_ROOT}/cli/panda_plot.R" "${NORMALIZED[@]}"
     ;;
   compare|comparison)
     normalize_results_args "$@"
-    exec "$R_SCRIPT" "${PROJECT_ROOT}/cli/panda_compare.R" "${NORMALIZED[@]}"
+    exec "$R_SCRIPT" "${R_STARTUP_ARGS[@]}" "${PROJECT_ROOT}/cli/panda_compare.R" "${NORMALIZED[@]}"
     ;;
   --help|-h|help)
     usage

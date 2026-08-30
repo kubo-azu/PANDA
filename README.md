@@ -123,6 +123,18 @@ which Rscript
 Rscript -e 'cat(R.version.string, "\n"); cat(R.home(), "\n")'
 ```
 
+If several R installations are available, pin the interpreter used by the
+installed launcher (and by the manuscript workflow) before running PANDA:
+
+```bash
+export R_PANDA_RSCRIPT=/absolute/path/to/the/intended/Rscript
+panda --help
+```
+
+The `panda` launcher activates this repository's `renv` project even when the
+command is run from another directory. User-supplied relative input and output
+paths are still resolved from the directory in which the command is invoked.
+
 Do not install PANDA's Bioconductor dependencies separately through both
 conda and R; let `renv::restore()` install the versions recorded in
 `renv.lock`. The conda environment should use the R version specified by the
@@ -180,6 +192,8 @@ The main analysis options are:
 | `--min-identity` | minimum alignment identity (%) | `90` |
 | `--min-conversion` | minimum bisulfite conversion (%) | `95` |
 | `--min-count` | minimum NGS multiplicity | `1` |
+| `--min-shared-cpg` | minimum CpGs shared by a read pair for amplicon qFDRP | `4` |
+| `--min-window-coverage` | minimum retained-read/clone coverage for a 4-CpG epipolymorphism window | `2` |
 | `--workers` | number of parallel alignment workers (OS-independent; backend selected automatically; maximum 16) | `16` |
 | `--read-mode` | `merged` or `unmerged` paired-end handling | `merged` |
 | `--max-reads` | optional computational read limit | all reads |
@@ -213,6 +227,8 @@ The most important defaults are:
 min_identity       90
 min_conversion     95
 min_count          1
+min_shared_cpg     4
+min_window_coverage 2
 read_mode          merged
 max_reads          all reads
 workers            16
@@ -279,9 +295,15 @@ panda compare RESULTS_DIR \
 ```
 
 The command writes CpG-level differences, statistics, and comparison PDFs.
-Biological replicates should be independent samples. Comparisons with fewer
-than two biological replicates per group are exploratory and should not be
-interpreted as replicated statistical inference.
+Summary bars and standard deviations are calculated from sample-level overall
+methylation values, and the individual sample values are plotted explicitly.
+The overall Wilcoxon test is reported only when each group contains at least
+two estimable samples; otherwise its value is `NA`. At each CpG, PANDA uses a
+sample-level Welch test when replicate coverage permits it and otherwise
+reports the pooled read-level Fisher test as a descriptive fallback. The
+`P_Value_Source` column records which test supplied every CpG-level value.
+Biological replicates should be independent samples, and pooled read-level
+tests must not be interpreted as replicated biological inference.
 
 ## ⚠️ Input and interpretation requirements
 
@@ -295,6 +317,30 @@ interpreted as replicated statistical inference.
   conversion, identity, and the experimental design.
 - Motif filtering is literal sequence filtering; all requested motifs must be
   present in a retained read.
+
+### Heterogeneity metrics and eligibility
+
+PANDA reports three complementary, amplicon-level summaries. Amplicon PDR is
+the percentage of eligible reads or clones (at least four observed CpGs) that
+contain both methylated and unmethylated calls. Window epipolymorphism is
+`1 - sum(p_k^2)` for each consecutive four-CpG window, where `p_k` is the
+read-abundance-weighted frequency of pattern `k`; PANDA reports the arithmetic
+mean across eligible windows. Amplicon qFDRP is the mean normalized Hamming
+distance between retained reads over CpGs observed in both members of a pair.
+
+For dereplicated NGS input, `Count` is the observed number of retained reads
+supporting an exact sequence variant. It is used as a read-abundance weight and
+must not be interpreted as a UMI-corrected molecule count. The qFDRP calculation
+is exactly equivalent to expanding variants by `Count`: pairs of reads from the
+same exact variant are included in the denominator and have distance zero.
+Sanger records have `Count = 1` and are equally weighted.
+
+Metrics that have no eligible records, windows, or pairs are reported as `NA`,
+not zero. Each per-sample heterogeneity CSV records a status, eligible counts,
+the weighted number of eligible qFDRP pairs, median shared-CpG count, and the
+thresholds used. The defaults are four shared CpGs for qFDRP and coverage of two
+for a four-CpG epipolymorphism window; both can be changed explicitly from the
+GUI or CLI and are recorded in the analysis bundle.
 
 ### Sanger input
 

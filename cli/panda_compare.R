@@ -176,8 +176,13 @@ jsonlite::write_json(
     group_a = group_names[[1L]], group_b = group_names[[2L]],
     samples_a = group_a, samples_b = group_b,
     replicate_p_used = comparison$replicate_p_used,
+    overall_test = comparison$overall_test,
+    pooled_overall_test = comparison$pooled_overall_test,
+    site_test_uses_replicates = comparison$site_test_uses_replicates,
     pooled_u_test_p = comparison$pooled_u_test_p,
     u_test_p = comparison$u_test_p,
+    sample_values = comparison$sample_values,
+    sample_summary = comparison$sample_summary,
     summary = comparison$summary,
     site_table = comparison$site_table
   ), stats_path, dataframe = "rows", auto_unbox = TRUE, na = "null", pretty = TRUE
@@ -186,7 +191,7 @@ jsonlite::write_json(
 site <- comparison$site_table
 site$Delta <- site$Pct_1 - site$Pct_2
 p_diff <- ggplot(site, aes(x = factor(Position), y = Delta, fill = Delta > 0)) +
-  geom_col(width = 0.72) +
+  geom_col(width = 0.72, na.rm = TRUE) +
   scale_fill_manual(values = c("TRUE" = "#D55E00", "FALSE" = "#0072B2"), guide = "none") +
   geom_hline(yintercept = 0, colour = "grey35") +
   theme_minimal(base_size = 15) +
@@ -195,15 +200,40 @@ p_diff <- ggplot(site, aes(x = factor(Position), y = Delta, fill = Delta > 0)) +
        x = "CpG position (bp)", y = "Difference in methylation (%)")
 ggsave(diff_path, p_diff, width = 9, height = 6, device = if (capabilities("cairo")) grDevices::cairo_pdf else "pdf")
 
-bar <- comparison$summary
+bar <- comparison$sample_summary
 bar$Group <- factor(bar$Group, levels = group_names)
+bar$Label_Y <- ifelse(bar$Mean > 92, bar$Mean - 4, bar$Mean + 4)
+sample_values <- comparison$sample_values
+sample_values$Group <- factor(sample_values$Group, levels = group_names)
 p_bar <- ggplot(bar, aes(x = Group, y = Mean, fill = Group)) +
   geom_col(width = 0.65) +
+  geom_errorbar(
+    aes(ymin = pmax(0, Mean - SD), ymax = pmin(100, Mean + SD)),
+    width = 0.14, linewidth = 0.5, na.rm = TRUE
+  ) +
+  geom_point(
+    data = sample_values,
+    aes(x = Group, y = Overall_Methylation),
+    inherit.aes = FALSE,
+    position = position_jitter(width = 0.07, height = 0, seed = 11),
+    shape = 21, size = 3, stroke = 0.7, fill = "white", colour = "black"
+  ) +
   scale_fill_manual(values = c("#0072B2", "#D55E00"), drop = FALSE) +
-  geom_text(aes(label = sprintf("%.2f", Mean)), vjust = -0.4, size = 4) +
-  theme_minimal(base_size = 15) + theme(legend.position = "none") +
-  labs(title = "Group methylation summary", x = NULL, y = "Mean methylation (%)")
-ggsave(bar_path, p_bar, width = 6.5, height = 5.5, device = if (capabilities("cairo")) grDevices::cairo_pdf else "pdf")
+  geom_text(
+    aes(y = Label_Y, label = sprintf("%.2f", Mean)),
+    vjust = 0.5, size = 4
+  ) +
+  scale_y_continuous(breaks = seq(0, 100, 20),
+                     expand = expansion(mult = c(0, 0.08))) +
+  coord_cartesian(ylim = c(0, 100), clip = "off") +
+  theme_minimal(base_size = 15) +
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  labs(
+    title = "Group methylation summary",
+    subtitle = "Bars: sample means; error bars: SD; points: samples",
+    x = NULL, y = "Mean methylation (%)"
+  )
+ggsave(bar_path, p_bar, width = 7.2, height = 5.5, device = if (capabilities("cairo")) grDevices::cairo_pdf else "pdf")
 
 cat("PANDA comparison completed.\n")
 cat("Sites: ", site_path, "\nStatistics: ", stats_path, "\n", sep = "")
