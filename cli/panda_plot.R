@@ -198,6 +198,9 @@ for (sample_id in names(sample_records)) {
     lollipop_data$ReadID <- factor(lollipop_data$ReadID, levels = lollipop_counts$ReadID)
     lollipop_counts$ReadID <- factor(lollipop_counts$ReadID,
                                      levels = levels(lollipop_data$ReadID))
+    plot_title <- paste0(sample_id, ": methylation lollipop (Top ",
+                         min(top_n, nrow(lollipop_counts)), ")")
+    plot_subtitle <- "Top-N selected by Count; rows displayed by methylation state"
     p1 <- ggplot(lollipop_data, aes(x = CpG_Index, y = ReadID)) +
       geom_line(aes(group = ReadID), color = "grey80") +
       geom_point(aes(fill = factor(Methylation)), shape = 21, size = 3, color = "black") +
@@ -206,10 +209,7 @@ for (sample_id in names(sample_records)) {
       theme(axis.text.y = element_blank(),
             axis.text.x = element_text(angle = 90, vjust = 0.5, size = 14),
             axis.title = element_text(size = 15)) +
-      labs(title = paste0(sample_id, ": methylation lollipop (Top ",
-                          min(top_n, nrow(lollipop_counts)), ")"),
-           subtitle = "Top-N selected by Count; rows displayed by methylation state",
-           x = "CpG index", y = "Variant");
+      labs(x = "CpG index", y = "Variant")
     ## Restore the abundance panel used in the GUI.  It is informative for
     ## dereplicated amplicon/NGS data; for Sanger clones (Count == 1) it is
     ## omitted because every bar would have identical height.
@@ -220,14 +220,24 @@ for (sample_id in names(sample_records)) {
         geom_col(fill = "steelblue") +
         geom_text(aes(label = paste0("#", Count_Rank, " (n=", Count, ")")),
                   hjust = -0.1, size = 4.2) +
-        scale_x_continuous(expand = expansion(mult = c(0, 0.55))) +
+        scale_x_continuous(expand = expansion(mult = c(0, 1.05))) +
         theme_void(base_size = 13) +
-        theme(plot.margin = margin(l = 10, r = 30)) +
+        theme(plot.margin = margin(l = 10, r = 12)) +
+        coord_cartesian(clip = "off") +
         labs(title = "Read Count")
-      p <- p1 + p2 + plot_layout(widths = c(3, 1))
+      p <- p1 + p2 + plot_layout(widths = c(3, 1.35))
     }
+    p <- p + plot_annotation(
+      title = plot_title,
+      subtitle = plot_subtitle,
+      theme = theme(
+        plot.title = element_text(size = 18, face = "plain"),
+        plot.subtitle = element_text(size = 14)
+      )
+    )
     ggsave(file.path(plot_dir, paste0(safe_name, "_lollipop.pdf")),
-           p, width = if (is_sanger) 10.5 else 13, height = 8.3, device = pdf_device)
+           p, width = if (is_sanger) 10.5 else 14.2, height = 8.3,
+           device = pdf_device)
   }
 
   if ("asm" %in% plots) {

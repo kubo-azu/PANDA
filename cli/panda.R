@@ -8,8 +8,8 @@ usage <- function() {
     paste0(
       "PANDA command-line interface\n\n",
       "Usage:\n",
-      "  Rscript cli/panda.R --mode MODE --input INPUT --reference REF [options]\n",
-      "  Rscript cli/panda.R --config analysis.json [override options]\n",
+      "  panda analyze --mode MODE --input INPUT --reference REF [options]\n",
+      "  panda analyze --config analysis.json [override options]\n",
       "\n",
       "Required for direct mode:\n",
       "  --mode sanger|amplicon|ngs  --input FILE_OR_DIR  --reference FASTA\n",
@@ -20,11 +20,13 @@ usage <- function() {
       "  --read-mode merged|unmerged  --max-reads N  --max-unique-reads N\n",
       "  --motif-file motifs.txt (one motif per line; all motifs required)\n",
       "  --motifs MOTIF[,MOTIF...]  --ab1-trim-start N  --ab1-trim-end N\n",
+      "  --min-shared-cpg N (qFDRP; default 4)\n",
+      "  --min-window-coverage N (epipolymorphism; default 2)\n",
       "  --cluster-method kmeans  --k N  --seed N\n",
       "\n",
       "Config files are optional and useful for exact reproducibility.\n",
       "NGS paired-end: --read-mode unmerged (R1/R2 names must contain _R1/_R2 or _1/_2)\n",
-      "  Rscript cli/panda.R --help\n"
+      "  panda analyze --help\n"
     )
   )
 }
@@ -102,6 +104,8 @@ ab1_end_direct <- arg_value("--ab1-trim-end")
 cluster_method_direct <- arg_value("--cluster-method")
 k_direct <- arg_value("--k")
 seed_direct <- arg_value("--seed")
+min_shared_cpg_direct <- arg_value("--min-shared-cpg")
+min_window_coverage_direct <- arg_value("--min-window-coverage")
 
 output_override <- NULL
 if ("--output-dir" %in% args) {
@@ -147,25 +151,33 @@ if (!is.null(config_path)) {
     reference = list(reference_direct),
     output = list("panda_cli_results")
   )
-  direct_fields <- list(
-    reference_target = reference_target_direct,
-    min_identity = min_identity_direct,
-    min_conversion = min_conversion_direct,
-    min_count = min_count_direct,
-    workers = workers_direct,
-    read_mode = read_mode_direct,
-    max_reads = max_reads_direct,
-    max_unique_reads = max_unique_direct,
-    motifs = motifs_direct,
-    ab1_trim_start = ab1_start_direct,
-    ab1_trim_end = ab1_end_direct,
-    cluster_method = cluster_method_direct,
-    k = k_direct,
-    seed = seed_direct
-  )
-  for (nm in names(direct_fields)) {
-    if (!is.null(direct_fields[[nm]])) config[[nm]] <- list(direct_fields[[nm]])
-  }
+}
+
+# Explicit command-line options always override values loaded from a config
+# file. This makes config files a reproducible baseline without silently
+# ignoring a user's requested one-off changes.
+direct_fields <- list(
+  input = input_direct,
+  reference = reference_direct,
+  reference_target = reference_target_direct,
+  min_identity = min_identity_direct,
+  min_conversion = min_conversion_direct,
+  min_count = min_count_direct,
+  workers = workers_direct,
+  read_mode = read_mode_direct,
+  max_reads = max_reads_direct,
+  max_unique_reads = max_unique_direct,
+  motifs = motifs_direct,
+  ab1_trim_start = ab1_start_direct,
+  ab1_trim_end = ab1_end_direct,
+  cluster_method = cluster_method_direct,
+  k = k_direct,
+  seed = seed_direct,
+  min_shared_cpg = min_shared_cpg_direct,
+  min_window_coverage = min_window_coverage_direct
+)
+for (nm in names(direct_fields)) {
+  if (!is.null(direct_fields[[nm]])) config[[nm]] <- list(direct_fields[[nm]])
 }
 
 if (is.null(config$output)) {
@@ -175,14 +187,6 @@ if (!is.null(output_override)) {
   config$output <- list(output_override)
 }
 if (!is.null(mode_override)) {
-  config_mode <- if (!is.null(config$mode)) tolower(as.character(config$mode[[1L]])) else NULL
-  if (!is.null(config_mode) && !identical(config_mode, mode_override)) {
-    stop(
-      "Command-line mode '", mode_override,
-      "' conflicts with config mode '", config_mode, "'.",
-      call. = FALSE
-    )
-  }
   config$mode <- list(mode_override)
 }
 if (!is.null(motif_file_override)) {
@@ -478,6 +482,22 @@ workers <- min(workers, 16L)
 cluster_method <- if (!is.null(config$cluster_method)) as.character(config$cluster_method[[1L]]) else "kmeans"
 cluster_k <- if (!is.null(config$k)) as.integer(config$k[[1L]]) else 2L
 cluster_seed <- if (!is.null(config$seed)) as.integer(config$seed[[1L]]) else 11L
+min_shared_cpg <- if (!is.null(config$min_shared_cpg)) {
+  as.integer(config$min_shared_cpg[[1L]])
+} else {
+  4L
+}
+min_window_coverage <- if (!is.null(config$min_window_coverage)) {
+  as.integer(config$min_window_coverage[[1L]])
+} else {
+  2L
+}
+if (is.na(min_shared_cpg) || min_shared_cpg < 1L) {
+  stop("min_shared_cpg must be a positive integer.", call. = FALSE)
+}
+if (is.na(min_window_coverage) || min_window_coverage < 1L) {
+  stop("min_window_coverage must be a positive integer.", call. = FALSE)
+}
 
 
 read_format <- function(path) {
@@ -701,7 +721,12 @@ for (record_index in seq_len(nrow(input_records))) {
   }
   
   heterogeneity <- PANDAcore::calculate_heterogeneity(
-    result, cluster_method = cluster_method, k = cluster_k, seed = cluster_seed
+    result,
+    min_shared_cpg = min_shared_cpg,
+    min_window_coverage = min_window_coverage,
+    cluster_method = cluster_method,
+    k = cluster_k,
+    seed = cluster_seed
   )
   
   statistics <- PANDAcore::calculate_quma_stats(
@@ -727,7 +752,10 @@ for (record_index in seq_len(nrow(input_records))) {
         as.data.frame(heterogeneity$meth_mat, check.names = FALSE),
         check.names = FALSE, stringsAsFactors = FALSE
       ),
-      clusters = heterogeneity$clusters
+      clusters = heterogeneity$clusters,
+      pdr_by_cpg = heterogeneity$pdr_by_cpg,
+      epipolymorphism_by_window = heterogeneity$epipolymorphism_by_window,
+      qfdrp_shared_cpg_distribution = heterogeneity$qfdrp_shared_cpg_distribution
     ),
     statistics = statistics$cpg_table
   )
@@ -762,6 +790,24 @@ for (record_index in seq_len(nrow(input_records))) {
     ),
     row.names = FALSE
   )
+
+  write.csv(
+    heterogeneity$pdr_by_cpg,
+    file = file.path(output_dir, paste0(safe_name, "_pdr_by_cpg.csv")),
+    row.names = FALSE
+  )
+
+  write.csv(
+    heterogeneity$epipolymorphism_by_window,
+    file = file.path(output_dir, paste0(safe_name, "_epipolymorphism_windows.csv")),
+    row.names = FALSE
+  )
+
+  write.csv(
+    heterogeneity$qfdrp_shared_cpg_distribution,
+    file = file.path(output_dir, paste0(safe_name, "_qfdrp_shared_cpg_distribution.csv")),
+    row.names = FALSE
+  )
   
   write.csv(
     statistics$cpg_table,
@@ -782,22 +828,43 @@ for (record_index in seq_len(nrow(input_records))) {
     Input = input_file,
     Input_Reads = raw_input_n,
     Reads = raw_read_n,
-    Motif_Filtered_Reads = min(motif_retained_n, raw_read_n),
+    Motif_Filtered_Reads = if (length(motifs)) {
+      min(motif_retained_n, raw_read_n)
+    } else {
+      NA_integer_
+    },
     Motifs = if (length(motifs)) paste(motifs, collapse = ",") else "",
     Motif_File = if (!is.null(motif_file)) motif_file else "",
     Unique_Sequences = dereplicated$unique_n,
     Retained_Reads = sum(dereplicated$counts),
     Min_Count = min_count,
+    Min_Shared_CpGs = min_shared_cpg,
+    Min_Window_Coverage = min_window_coverage,
     Aligned_Records = nrow(result$read_summary),
     Passed = sum(passed, na.rm = TRUE),
     Overall_Methylation = statistics$overall,
     Amplicon_PDR = heterogeneity$scores$Value[
       heterogeneity$scores$Metric == "Amplicon PDR"
     ],
+    Amplicon_PDR_Status = heterogeneity$scores$Status[
+      heterogeneity$scores$Metric == "Amplicon PDR"
+    ],
     Window_Epipolymorphism = heterogeneity$scores$Value[
       heterogeneity$scores$Metric == "Window Epipolymorphism"
     ],
+    Window_Epipolymorphism_Status = heterogeneity$scores$Status[
+      heterogeneity$scores$Metric == "Window Epipolymorphism"
+    ],
     Amplicon_qFDRP = heterogeneity$scores$Value[
+      heterogeneity$scores$Metric == "Amplicon qFDRP"
+    ],
+    Amplicon_qFDRP_Status = heterogeneity$scores$Status[
+      heterogeneity$scores$Metric == "Amplicon qFDRP"
+    ],
+    qFDRP_Weighted_Eligible_Pairs = heterogeneity$scores$Weighted_Eligible_Pairs[
+      heterogeneity$scores$Metric == "Amplicon qFDRP"
+    ],
+    qFDRP_Median_Shared_CpGs = heterogeneity$scores$Median_Shared_CpGs[
       heterogeneity$scores$Metric == "Amplicon qFDRP"
     ],
     stringsAsFactors = FALSE
@@ -851,7 +918,11 @@ if (!is.null(config$groups)) {
     )
     for (metric in metric_names) {
       values <- group_data[[metric]]
-      out[[paste0("Mean_", metric)]] <- mean(values, na.rm = TRUE)
+      out[[paste0("Mean_", metric)]] <- if (any(is.finite(values))) {
+        mean(values, na.rm = TRUE)
+      } else {
+        NA_real_
+      }
       out[[paste0("SD_", metric)]] <- if (sum(is.finite(values)) > 1L) {
         stats::sd(values, na.rm = TRUE)
       } else {
@@ -893,7 +964,7 @@ if (!is.null(config$groups)) {
 }
 
 analysis_bundle <- list(
-  schema_version = "0.2",
+  schema_version = "0.3",
   generated_at = format(Sys.time(), tz = "UTC"),
   parameters = list(
     mode = mode,
@@ -908,6 +979,8 @@ analysis_bundle <- list(
     cluster_method = cluster_method,
     k = cluster_k,
     seed = cluster_seed,
+    min_shared_cpg = min_shared_cpg,
+    min_window_coverage = min_window_coverage,
     workers = workers
   ),
   summary = summary_table,

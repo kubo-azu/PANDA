@@ -8,6 +8,12 @@ the non-UI functions used by the command-line workflow, including:
 - methylation statistics and CpG-level summaries; and
 - PDR, window epipolymorphism, qFDRP, and ASM clustering calculations.
 
+The heterogeneity implementation treats Sanger records as equally weighted
+clones and NGS `Count` values as observed retained-read abundance. Amplicon
+qFDRP is exactly equivalent to expanding dereplicated variants by `Count`, so
+same-variant read pairs are retained with zero distance. Ineligible metrics are
+reported as `NA` together with eligibility diagnostics and thresholds.
+
 The Shiny application and CLI are the user-facing interfaces. The package is
 kept in the repository so that the computational layer can be tested and
 versioned independently from the GUI.
