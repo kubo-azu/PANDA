@@ -39,6 +39,12 @@ PANDA is intended for targeted amplicons, not whole-genome alignment. Read
 quality trimming, adapter/primer removal, and other experiment-specific QC
 should be performed before PANDA when appropriate.
 
+The released demonstration datasets are ready to analyze. The optional
+`PANDA_demo_data_generation.R` development script requires the mouse BSgenome
+package only when regenerating those datasets from scratch; this large
+genome-generation dependency is intentionally excluded from the standard
+PANDA installation.
+
 ## 🧩 Platform layout
 
 ```text
@@ -66,23 +72,75 @@ only use the hosted GUI.
    installation is required.
 2. **Local GUI:** clone the repository and run `app.R` when local files,
    privacy, or interactive exploration require it.
-3. **CLI:** restore the project environment and install the user-level
-   `panda` launcher for scripted or server-side analyses.
+3. **CLI:** run the installer to restore the project environment and create the
+   user-level `panda` command for scripted or server-side analyses.
 
 ## 📦 Optional local installation
 
 The following steps are only for local GUI or CLI use. PANDA requires R 4.6.1
-and the project dependencies recorded in `renv.lock`.
+and the project dependencies recorded in `renv.lock`. The CLI is supported on
+macOS and Linux; Windows users should run it in WSL2.
 
-From a cloned repository:
+From a cloned repository, the same installer command is used on macOS, Linux,
+and WSL2:
 
 ```bash
 git clone https://github.com/kubo-azu/PANDA.git
 cd PANDA
-Rscript -e 'install.packages("renv", repos="https://cloud.r-project.org")'
-Rscript -e 'renv::restore()'
 ./install_panda.sh
+panda --help
 ```
+
+The installer checks the selected R version and CPU architecture, restores the
+project library, verifies that PANDAcore can be loaded, and creates the
+user-level `panda` command. If multiple R installations are available, select
+one explicitly:
+
+```bash
+./install_panda.sh --rscript /absolute/path/to/Rscript
+```
+
+The validated R interpreter is recorded for PANDA only; the installer does not
+change the system-wide R selection used by rig, conda, RStudio, or other
+projects.
+
+### macOS prerequisites
+
+On macOS, use an R installation whose architecture matches the computer and
+the compiled libraries used by R. In particular, Apple Silicon Macs should use
+the native arm64 build of R rather than an x86_64 build running through
+Rosetta. Check the environment before restoring the project:
+
+```bash
+uname -m
+Rscript --vanilla -e '
+cat(R.version.string, "\n")
+cat("R architecture:", R.version$arch, "\n")
+cat("R home:", R.home(), "\n")
+'
+```
+
+For an Apple Silicon installation, `uname -m` should report `arm64`, and R
+should report an ARM architecture such as `aarch64` rather than `x86_64`.
+Install Apple's Command Line Tools before building any R packages from source:
+
+```bash
+xcode-select --install
+```
+
+PANDA's R package versions are managed by `renv`, but compilers and any
+external libraries needed to build source packages are supplied by the
+operating system or an environment manager. The standard PANDA installation
+excludes optional demo-generation dependencies, including packages that would
+otherwise bring in RCurl and XML. If another package still has to be compiled
+from source, an error mentioning a missing library indicates a system
+dependency rather than an error in PANDA's methylation analysis.
+
+The native CRAN arm64 R distribution and its matching toolchain are the
+recommended setup for Apple Silicon. Do not mix arm64 and x86_64 installations
+of R, Homebrew, or compiled R packages. If an older project library was created
+with a different R or CPU architecture, restore PANDA in a new project library
+rather than reusing the incompatible compiled packages.
 
 The installer places a user-level `panda` launcher in `~/.local/bin`. If that
 directory is not on `PATH`, run:
@@ -91,8 +149,19 @@ directory is not on `PATH`, run:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-No administrator privileges are required. The installer does not modify the
-system R installation or install packages outside the project environment.
+The installer itself does not require administrator privileges, modify the
+system R installation, or install R packages outside the project environment.
+Installation of a missing compiler or system library may still require a
+system administrator.
+
+### Windows through WSL2
+
+The native Windows CLI is not currently an officially tested target. Windows
+users should install WSL2, open its Linux shell, and then follow the same
+installation commands shown above. Keep the repository and analysis data in
+the WSL Linux filesystem (for example, `~/PANDA` and `~/data`) rather than
+under `/mnt/c` when possible, because cross-filesystem access can substantially
+reduce I/O performance.
 
 ### Optional: use PANDA inside a conda environment
 
@@ -110,8 +179,6 @@ conda create -n panda-r -c conda-forge r-base=4.6.1
 conda activate panda-r
 
 cd PANDA
-Rscript -e 'install.packages("renv", repos="https://cloud.r-project.org")'
-Rscript -e 'renv::restore(prompt = FALSE)'
 ./install_panda.sh
 panda --help
 ```
@@ -123,12 +190,11 @@ which Rscript
 Rscript -e 'cat(R.version.string, "\n"); cat(R.home(), "\n")'
 ```
 
-If several R installations are available, pin the interpreter used by the
-installed launcher (and by the manuscript workflow) before running PANDA:
+If several R installations are available, select the interpreter while
+installing PANDA:
 
 ```bash
-export R_PANDA_RSCRIPT=/absolute/path/to/the/intended/Rscript
-panda --help
+./install_panda.sh --rscript /absolute/path/to/the/intended/Rscript
 ```
 
 The `panda` launcher activates this repository's `renv` project even when the

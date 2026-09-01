@@ -1,0 +1,9 @@
+# The released demonstration data are already generated. Rebuilding them is a
+# development task with an optional mouse-genome dependency and is not required
+# to run the PANDA GUI, CLI, examples, or tests.
+PANDA_demo_data_generation.R
+
+# Sequence fixtures and generated analysis bundles do not contain R package
+# dependencies and should not be scanned during snapshot/status operations.
+PANDA_Demo/
+results/

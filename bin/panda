@@ -21,6 +21,7 @@ R_SCRIPT="${R_PANDA_RSCRIPT:-Rscript}"
 # current working directory is deliberately preserved so user-supplied
 # relative input/output paths retain conventional CLI semantics.
 export R_PROFILE_USER="${PROJECT_ROOT}/.Rprofile"
+export RENV_CONFIG_NAMESPACES_CHECK="${RENV_CONFIG_NAMESPACES_CHECK:-FALSE}"
 R_STARTUP_ARGS=(--no-site-file)
 
 usage() {
