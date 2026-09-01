@@ -4,6 +4,17 @@
 
 set.seed(11)
 
+if (!requireNamespace("BSgenome.Mmusculus.UCSC.mm10", quietly = TRUE)) {
+  stop(
+    paste(
+      "This optional development script requires",
+      "BSgenome.Mmusculus.UCSC.mm10, which is intentionally excluded from",
+      "the standard PANDA installation. Install it separately only when",
+      "regenerating the released demonstration datasets."
+    ),
+    call. = FALSE
+  )
+}
 library(BSgenome.Mmusculus.UCSC.mm10)
 library(Biostrings)
 
