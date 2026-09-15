@@ -385,39 +385,45 @@ analyze_group_comparison <- function(res_list_A, res_list_B,
   }
   sample_A <- sample_site(res_list_A, g1_name)
   sample_B <- sample_site(res_list_B, g2_name)
-  p_vals <- numeric(nrow(full_site_table))
-  pooled_p_vals <- numeric(nrow(full_site_table))
-  replicate_p_vals <- rep(NA, nrow(full_site_table))
-  for (i in 1:nrow(full_site_table)) {
-    m1 <- full_site_table$Meth_1[i]
-    u1 <- full_site_table$Total_1[i] - m1
-    m2 <- full_site_table$Meth_2[i]
-    u2 <- full_site_table$Total_2[i] - m2
-    if (full_site_table$Total_1[i] == 0 || full_site_table$Total_2[i] ==
-        0) {
-      pooled_p_vals[i] <- NA
-    }
-    else {
-      mat <- matrix(c(m1, u1, m2, u2), nrow = 2, byrow = TRUE)
-      pooled_p_vals[i] <- fisher.test(mat)$p.value
-    }
-    if (nrow(sample_A) && nrow(sample_B)) {
-      a <- sample_A$Pct[sample_A$Position == cpg_sites[i]]
-      b <- sample_B$Pct[sample_B$Position == cpg_sites[i]]
-      if (sum(is.finite(a)) >= 2L && sum(is.finite(b)) >= 
-          2L) 
-        replicate_p_vals[i] <- tryCatch(t.test(a, b)$p.value, 
-                                        error = function(e) NA)
+  # Only independent sample percentages enter inferential tests. Read counts
+  # remain descriptive and never replace missing biological replication.
+  n_sites <- nrow(full_site_table)
+  replicate_p_vals <- rep(NA_real_, n_sites)
+  n_a <- n_b <- integer(n_sites)
+  test_status <- rep("not_estimable", n_sites)
+  for (i in seq_len(n_sites)) {
+    a <- sample_A$Pct[sample_A$Position == cpg_sites[i]]
+    b <- sample_B$Pct[sample_B$Position == cpg_sites[i]]
+    a <- a[is.finite(a)]
+    b <- b[is.finite(b)]
+    n_a[i] <- length(a)
+    n_b[i] <- length(b)
+    if (!length(a) || !length(b)) {
+      test_status[i] <- "no_coverage_in_one_or_both_groups"
+    } else if (length(a) < 2L || length(b) < 2L) {
+      test_status[i] <- "insufficient_samples"
+    } else if (stats::var(a) == 0 && stats::var(b) == 0) {
+      test_status[i] <- "zero_variance_in_both_groups"
+    } else {
+      p <- tryCatch(t.test(a, b)$p.value, error = function(e) NA_real_)
+      if (is.finite(p)) {
+        replicate_p_vals[i] <- p
+        test_status[i] <- "ok"
+      } else {
+        test_status[i] <- "welch_test_not_estimable"
+      }
     }
   }
-  p_vals <- ifelse(is.finite(replicate_p_vals), replicate_p_vals, 
-                   pooled_p_vals)
-  full_site_table$P_Value <- p_vals
-  full_site_table$FDR <- p.adjust(p_vals, method = "BH")
+  full_site_table$P_Value <- replicate_p_vals
+  full_site_table$FDR <- rep(NA_real_, n_sites)
+  estimable <- is.finite(replicate_p_vals)
+  full_site_table$FDR[estimable] <- p.adjust(replicate_p_vals[estimable], method = "BH")
   full_site_table$P_Value_Source <- ifelse(
-    is.finite(replicate_p_vals), "sample_level_welch_t",
-    ifelse(is.finite(pooled_p_vals), "pooled_read_level_fisher", "not_estimable")
+    estimable, "sample_level_welch_t", "not_estimable"
   )
+  full_site_table$N_Samples_1 <- n_a
+  full_site_table$N_Samples_2 <- n_b
+  full_site_table$Test_Status <- test_status
   # Do not substitute pooled reads or dereplicated variants for biological
   # samples in the overall group test. Such a test would constitute
   # pseudoreplication and is deliberately not performed.
