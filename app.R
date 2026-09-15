@@ -492,123 +492,7 @@ calculate_quma_stats <- function(...) {
   PANDAcore::calculate_quma_stats(...)
 }
 
-analyze_group_comparison <- function(res_list_A, res_list_B, genome_seq, g1_name="Group 1", g2_name="Group 2") {
-  if (is(genome_seq, "DNAStringSet")) genome_seq <- genome_seq[[1]]
-  cpg_hits <- matchPattern("CG", genome_seq); cpg_sites <- start(cpg_hits)
-  
-  agg_long <- function(res_list, group_name) {
-    do.call(bind_rows, lapply(names(res_list), function(nm) {
-      df <- res_list[[nm]]$long_data
-      if(is.null(df) || nrow(df) == 0) return(NULL)
-      if(!"Count" %in% names(df)) { cnt <- str_extract(df$ReadID, "(?<=Count)\\d+"); df$Count <- ifelse(is.na(cnt), 1, as.integer(cnt)) }
-      df$SampleID <- nm; df$Group <- group_name
-      return(df)
-    }))
-  }
-  
-  df_A <- agg_long(res_list_A, g1_name); df_B <- agg_long(res_list_B, g2_name)
-  if(is.null(df_A) || is.null(df_B)) return(NULL)
-  combined_long <- bind_rows(df_A, df_B)
-  
-  agg_site <- function(df) { df %>% group_by(Position) %>% summarise(Meth = sum(Methylation * Count), Total = sum(Count), Pct = Meth/Total*100) }
-  site_A <- agg_site(df_A); site_B <- agg_site(df_B)
-  
-  full_site_table <- data.frame(Position = cpg_sites) %>%
-    left_join(site_A, by="Position") %>% rename(Meth_1=Meth, Total_1=Total, Pct_1=Pct) %>%
-    left_join(site_B, by="Position") %>% rename(Meth_2=Meth, Total_2=Total, Pct_2=Pct) %>%
-    replace_na(list(Meth_1=0, Total_1=0, Pct_1=0, Meth_2=0, Total_2=0, Pct_2=0))
-  
-  ## Pooled molecule-level Fisher tests are retained as a fallback and audit
-  ## field. When each group has >=2 samples, the displayed site p-values use
-  ## sample-level methylation percentages to avoid treating reads as biological
-  ## replicates (pseudo-replication).
-  sample_site <- function(res_list, group_name) {
-    bind_rows(lapply(names(res_list), function(nm) {
-      rr <- if (!is.null(res_list[[nm]]$metrics)) res_list[[nm]]$metrics else res_list[[nm]]
-      dd <- rr$long_data
-      if (is.null(dd) || !nrow(dd)) return(NULL)
-      if (!"Count" %in% names(dd)) dd$Count <- 1L
-      dd %>% group_by(Position) %>%
-        summarise(Pct = sum(Methylation * Count) / sum(Count) * 100,
-                  .groups = "drop") %>% mutate(SampleID = nm, Group = group_name)
-    }))
-  }
-  sample_A <- sample_site(res_list_A, g1_name)
-  sample_B <- sample_site(res_list_B, g2_name)
-  p_vals <- numeric(nrow(full_site_table))
-  pooled_p_vals <- numeric(nrow(full_site_table))
-  replicate_p_vals <- rep(NA_real_, nrow(full_site_table))
-  for(i in 1:nrow(full_site_table)) {
-    m1 <- full_site_table$Meth_1[i]; u1 <- full_site_table$Total_1[i] - m1
-    m2 <- full_site_table$Meth_2[i]; u2 <- full_site_table$Total_2[i] - m2
-    if(full_site_table$Total_1[i] == 0 && full_site_table$Total_2[i] == 0) {
-      pooled_p_vals[i] <- NA_real_
-    } else {
-      mat <- matrix(c(m1, u1, m2, u2), nrow = 2, byrow = TRUE)
-      pooled_p_vals[i] <- fisher.test(mat)$p.value
-    }
-    if (nrow(sample_A) && nrow(sample_B)) {
-      a <- sample_A$Pct[sample_A$Position == cpg_sites[i]]
-      b <- sample_B$Pct[sample_B$Position == cpg_sites[i]]
-      if (sum(is.finite(a)) >= 2L && sum(is.finite(b)) >= 2L)
-        replicate_p_vals[i] <- tryCatch(t.test(a, b)$p.value, error = function(e) NA_real_)
-    }
-  }
-  p_vals <- ifelse(is.finite(replicate_p_vals), replicate_p_vals, pooled_p_vals)
-  full_site_table$P_Value <- p_vals
-  
-  # Benjamini-Hochberg FDR correction
-  full_site_table$FDR <- p.adjust(p_vals, method = "BH")
-  
-  get_read_pcts <- function(res_list) {
-    unlist(lapply(res_list, function(r) {
-      rr <- if (!is.null(r$metrics)) r$metrics else r
-      d <- rr$read_summary %>% filter(!str_detect(Pattern, "^excluded"))
-      if(nrow(d)==0) return(numeric(0)); return(d$Meth_Pct) 
-    }))
-  }
-  reads_A <- get_read_pcts(res_list_A); reads_B <- get_read_pcts(res_list_B)
-  pooled_u_test_p <- NA
-  if(length(reads_A) > 0 && length(reads_B) > 0) {
-    reads_A <- na.omit(reads_A); reads_B <- na.omit(reads_B)
-    if(length(reads_A) > 0 && length(reads_B) > 0) { 
-      u_test <- wilcox.test(reads_A, reads_B, exact=FALSE)
-      pooled_u_test_p <- u_test$p.value 
-    }
-  }
-  sample_overall <- function(x) {
-    vapply(x, function(r) {
-      rr <- if (!is.null(r$metrics)) r$metrics else r; d <- rr$read_summary
-      d <- d[!grepl("^excluded", d$Pattern) & is.finite(d$Meth_Pct), ]
-      if (!nrow(d)) return(NA_real_)
-      if ("Count" %in% names(d)) weighted.mean(d$Meth_Pct, d$Count) else mean(d$Meth_Pct)
-    }, numeric(1))
-  }
-  oa <- sample_overall(res_list_A); ob <- sample_overall(res_list_B)
-  oa <- oa[is.finite(oa)]; ob <- ob[is.finite(ob)]
-  u_test_p <- if (length(oa) >= 2L && length(ob) >= 2L)
-    tryCatch(wilcox.test(oa, ob, exact = FALSE)$p.value, error = function(e) NA_real_)
-  else pooled_u_test_p
-  
-  sum_df <- data.frame(
-    Group = c(g1_name, g2_name),
-    Mean = c(mean(site_A$Pct, na.rm=T), mean(site_B$Pct, na.rm=T)),
-    SD = c(sd(oa, na.rm = TRUE), sd(ob, na.rm = TRUE))
-  )
-  sum_df$SD[!is.finite(sum_df$SD)] <- 0
-  
-  return(list(site_table = full_site_table, combined_long = combined_long,
-              u_test_p = u_test_p, pooled_u_test_p = pooled_u_test_p,
-              replicate_p_used = any(is.finite(replicate_p_vals)),
-              sample_summary = data.frame(Group = c(g1_name, g2_name),
-                                          N = c(length(oa), length(ob)),
-                                          Mean = c(mean(oa), mean(ob))),
-              summary = sum_df, g1_name=g1_name, g2_name=g2_name))
-}
-
-# Ensure any remaining local call sites use the shared, versioned engine.  The
-# legacy function body above is retained temporarily only to keep this
-# single-file Shiny application easy to diff against pre-1.0 versions.
+# Group comparisons use the shared engine in both GUI and CLI.
 analyze_group_comparison <- function(...) {
   PANDAcore::analyze_group_comparison(...)
 }
@@ -1058,7 +942,7 @@ ui <- page_navbar(
                                             hr(),
                                             
                                             h5(icon("scale-balanced"), "3. Group Comparison"),
-                                            p("Statistical comparison between two groups across Sanger or NGS batches. Summary bars, SD, and points are calculated from biological-sample values. The overall Wilcoxon test is reported only when both groups contain at least two estimable samples. At each CpG, a sample-level Welch test is used when replicate coverage permits it; otherwise a pooled read-level Fisher test is retained as a descriptive fallback and identified in the output table. ",
+                                            p("Statistical comparison between two groups across Sanger or NGS batches. Summary bars, SD, and points are calculated from biological-sample values. The overall Wilcoxon test is reported only when both groups contain at least two estimable samples. At each CpG, a sample-level Welch test requires at least two estimable independent samples per group. If it cannot be estimated, p-value and FDR are NA; the output table records the sample counts and reason. BH adjustment includes only estimable CpGs. Pooled methylation percentages are descriptive. ",
                                               strong("Single-CpG P-values are adjusted using the Benjamini-Hochberg method, and pooled read-level tests must not be interpreted as replicated biological inference."))
                                   ),
                                   
@@ -1075,7 +959,7 @@ ui <- page_navbar(
                                             hr(),
                                             
                                             h5(strong("Amplicon qFDRP:")),
-                                            p("Measures the read-abundance-weighted normalized Hamming distance between retained-read pairs over CpGs observed in both reads. Same-variant pairs are included with distance zero. It is an amplicon-level adaptation for long-range phased patterns; a high value indicates diverse read-level methylation states. Pairs sharing fewer than the selected minimum number of CpGs are excluded and reported in the diagnostics."),
+                                            p("Measures the read-abundance-weighted normalized Hamming distance between retained-read pairs over CpGs observed in both reads. Same-variant pairs are included with distance zero. It summarizes average pairwise disagreement and does not by itself distinguish bimodal from other pattern distributions with the same CpG methylation frequencies under common complete coverage. Interpret it alongside PDR, epipolymorphism, and read-level plots. The minimum shared-CpG threshold controls pair eligibility, not window width: each retained pair uses all CpGs observed in both reads. Changing the threshold can change results when pairwise coverage differs, or yield NA if no pairs remain."),
                                             div(class="alert alert-secondary",
                                                 "If no records, windows, or pairs meet an eligibility rule, PANDA reports NA with a diagnostic status rather than reporting zero heterogeneity. Eligibility thresholds can be changed in the analysis sidebar and are saved with the results.")
                                   )

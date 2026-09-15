@@ -365,11 +365,16 @@ Summary bars and standard deviations are calculated from sample-level overall
 methylation values, and the individual sample values are plotted explicitly.
 The overall Wilcoxon test is reported only when each group contains at least
 two estimable samples; otherwise its value is `NA`. At each CpG, PANDA uses a
-sample-level Welch test when replicate coverage permits it and otherwise
-reports the pooled read-level Fisher test as a descriptive fallback. The
-`P_Value_Source` column records which test supplied every CpG-level value.
-Biological replicates should be independent samples, and pooled read-level
-tests must not be interpreted as replicated biological inference.
+sample-level Welch test with at least two estimable independent samples in each
+group. There is no pooled read-level fallback. If the test cannot be estimated,
+`P_Value` and `FDR` are `NA`; descriptive pooled counts and percentages remain.
+`P_Value_Source` is `sample_level_welch_t` or `not_estimable`.
+`N_Samples_1` and `N_Samples_2` count finite sample percentages at each CpG.
+`Test_Status` records `ok`, `no_coverage_in_one_or_both_groups`,
+`insufficient_samples`, `zero_variance_in_both_groups`, or
+`welch_test_not_estimable`. BH adjustment is applied across estimable CpGs
+within each comparison. Sample files must represent independent biological
+samples for biological inference; read depth cannot replace replication.
 
 ## ⚠️ Input and interpretation requirements
 
@@ -407,6 +412,19 @@ the weighted number of eligible qFDRP pairs, median shared-CpG count, and the
 thresholds used. The defaults are four shared CpGs for qFDRP and coverage of two
 for a four-CpG epipolymorphism window; both can be changed explicitly from the
 GUI or CLI and are recorded in the analysis bundle.
+
+The minimum shared-CpG threshold controls pair eligibility, not window width.
+Every eligible pair uses **all** CpGs observed in both reads. Raising the
+threshold leaves distances unchanged for retained pairs, but can change the
+average when partially covered pairs are excluded, or produce `NA` when none
+remain. With common complete coverage, thresholds below that coverage give
+the same result; this does not establish robustness to variable coverage.
+
+With N reads covering the same CpGs, qFDRP equals
+`N / (N - 1) * mean(2 * p_c * (1 - p_c))`, where `p_c` is the methylation
+frequency at CpG c. Consequently, it does not distinguish different phased
+pattern distributions with identical site frequencies. Interpret this average
+disagreement together with PDR, epipolymorphism, and read-level plots.
 
 ### Sanger input
 

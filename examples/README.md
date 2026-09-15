@@ -26,35 +26,12 @@ Group membership files under `examples/groups/` contain one sample ID per
 line. They are used by `panda compare` and avoid embedding long sample lists in
 the command itself.
 
-## Manuscript demo re-analysis
+## Scope of these examples
 
-The complete, option-explicit manuscript workflow is available as:
-
-```bash
-bash tools/reanalyze_manuscript_demos.sh
-```
-
-It analyzes all reads in Experiments A-C with both NGS and Sanger modes,
-performs the Experiment B motif-filtered runs, creates plots and group
-comparisons, summarizes the synthetic ground-truth agreement, and runs the
-qFDRP shared-CpG sensitivity analysis. Results are written to
-`results/manuscript_reanalysis`.
-
-Ground-truth tables report methylation error and the retained-record recovery
-rate. Accuracy and qFDRP sensitivity PDFs are written separately for NGS and
-Sanger so the higher-depth NGS validation can be presented independently while
-retaining the Sanger validation as a complementary result.
-
-The script refuses to mix a new run with an existing non-empty result
-directory. A different destination or worker count can be specified without
-editing the script:
-
-```bash
-PANDA_MANUSCRIPT_OUTPUT=results/manuscript_reanalysis_v2 \
-PANDA_MANUSCRIPT_WORKERS=16 \
-bash tools/reanalyze_manuscript_demos.sh
-```
+Experiments A-C demonstrate PANDA features using synthetic data. The example
+configurations support analysis and plotting of the bundled data; they do not
+constitute a general robustness benchmark. Manuscript-specific figure and
+summary scripts are not included in this public repository.
 
 If more than one R installation is present, set `R_PANDA_RSCRIPT` to the
-intended `Rscript` executable. The manuscript script and the installed
-`panda` launcher will then use the same R runtime.
+intended `Rscript` executable when using the installed `panda` launcher.
