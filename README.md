@@ -363,8 +363,12 @@ panda compare RESULTS_DIR \
 The command writes CpG-level differences, statistics, and comparison PDFs.
 Summary bars and standard deviations are calculated from sample-level overall
 methylation values, and the individual sample values are plotted explicitly.
-The overall Wilcoxon test is reported only when each group contains at least
-two estimable samples; otherwise its value is `NA`. At each CpG, PANDA uses a
+The overall Wilcoxon rank-sum test is reported only when each group contains at
+least two estimable samples; otherwise its value is `NA`. PANDA uses the
+documented default behavior of R's `stats::wilcox.test`: an exact p-value is
+calculated for supported small-sample comparisons, and the normal approximation
+is used otherwise. The statistics JSON records the method selected by R, the
+test statistic, and whether exact calculation was used. At each CpG, PANDA uses a
 sample-level Welch test with at least two estimable independent samples in each
 group. There is no pooled read-level fallback. If the test cannot be estimated,
 `P_Value` and `FDR` are `NA`; descriptive pooled counts and percentages remain.

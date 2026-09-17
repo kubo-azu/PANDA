@@ -34,6 +34,12 @@ read-level fallback. Non-estimable p-values and FDR remain `NA`; site tables
 include `N_Samples_1`, `N_Samples_2`, and `Test_Status`. BH adjustment includes
 only estimable CpGs in the comparison. See the main README for status definitions.
 
+For sample-level overall methylation, group comparison uses the documented
+default behavior of R's `stats::wilcox.test`. R calculates an exact p-value for
+supported small-sample comparisons and otherwise uses the normal approximation.
+The result records the method selected by R, the test statistic, and whether
+exact calculation was used.
+
 The qFDRP shared-CpG minimum is a pair eligibility threshold, not a window size.
 Retained pairs use all shared CpGs. Under common complete coverage, qFDRP is
 determined by site methylation frequencies and cannot identify bimodality alone.

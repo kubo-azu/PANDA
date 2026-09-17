@@ -320,6 +320,42 @@ calculate_quma_stats <- function(res_obj, mode = "Sanger") {
               sd_seq = sd_seq, se_seq = se_seq, cpg_table = full_cpg_stats))
 }
 
+.panda_sample_level_wilcoxon <- function(x, y) {
+  x <- x[is.finite(x)]
+  y <- y[is.finite(y)]
+  if (length(x) < 2L || length(y) < 2L) {
+    return(list(
+      p.value = NA_real_, statistic = NA_real_,
+      method = "not_estimable", exact = NA,
+      r_method = NA_character_
+    ))
+  }
+
+  test <- tryCatch(
+    suppressWarnings(wilcox.test(x, y)),
+    error = function(e) NULL
+  )
+  if (is.null(test) || !is.finite(test$p.value)) {
+    return(list(
+      p.value = NA_real_, statistic = NA_real_,
+      method = "wilcoxon_test_not_estimable", exact = NA,
+      r_method = if (is.null(test)) NA_character_ else test$method
+    ))
+  }
+  exact_used <- grepl("exact", test$method, ignore.case = TRUE)
+  list(
+    p.value = unname(test$p.value),
+    statistic = unname(test$statistic),
+    method = if (exact_used) {
+      "sample_level_wilcoxon_exact"
+    } else {
+      "sample_level_wilcoxon_asymptotic"
+    },
+    exact = exact_used,
+    r_method = test$method
+  )
+}
+
 analyze_group_comparison <- function(res_list_A, res_list_B, 
                                      genome_seq, g1_name = "Group 1", g2_name = "Group 2") {
   if (methods::is(genome_seq, "DNAStringSet")) 
@@ -447,11 +483,8 @@ analyze_group_comparison <- function(res_list_A, res_list_B,
   ob <- sample_overall(res_list_B)
   oa <- oa[is.finite(oa)]
   ob <- ob[is.finite(ob)]
-  sample_level_test_available <- length(oa) >= 2L && length(ob) >= 2L
-  u_test_p <- if (sample_level_test_available)
-    tryCatch(wilcox.test(oa, ob, exact = FALSE)$p.value, 
-             error = function(e) NA)
-  else NA_real_
+  overall_test_result <- .panda_sample_level_wilcoxon(oa, ob)
+  u_test_p <- overall_test_result$p.value
   sample_values <- data.frame(
     Sample = c(names(oa), names(ob)),
     Group = c(rep(g1_name, length(oa)), rep(g2_name, length(ob))),
@@ -470,8 +503,10 @@ analyze_group_comparison <- function(res_list_A, res_list_B,
   return(list(site_table = full_site_table, combined_long = combined_long, 
               u_test_p = u_test_p, pooled_u_test_p = pooled_u_test_p, 
               replicate_p_used = any(is.finite(replicate_p_vals)), 
-              overall_test = if (sample_level_test_available)
-                "sample_level_wilcoxon" else "not_estimable",
+              overall_test = overall_test_result$method,
+              overall_test_exact = overall_test_result$exact,
+              overall_test_statistic = overall_test_result$statistic,
+              overall_test_r_method = overall_test_result$r_method,
               pooled_overall_test = "not_performed_to_avoid_pseudoreplication",
               site_test_uses_replicates = any(is.finite(replicate_p_vals)),
               sample_values = sample_values,

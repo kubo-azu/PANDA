@@ -942,8 +942,8 @@ ui <- page_navbar(
                                             hr(),
                                             
                                             h5(icon("scale-balanced"), "3. Group Comparison"),
-                                            p("Statistical comparison between two groups across Sanger or NGS batches. Summary bars, SD, and points are calculated from biological-sample values. The overall Wilcoxon test is reported only when both groups contain at least two estimable samples. At each CpG, a sample-level Welch test requires at least two estimable independent samples per group. If it cannot be estimated, p-value and FDR are NA; the output table records the sample counts and reason. BH adjustment includes only estimable CpGs. Pooled methylation percentages are descriptive. ",
-                                              strong("Single-CpG P-values are adjusted using the Benjamini-Hochberg method, and pooled read-level tests must not be interpreted as replicated biological inference."))
+                                            p("Statistical comparison between two groups across Sanger or NGS batches. Summary bars, SD, and points are calculated from biological-sample values. The overall Wilcoxon rank-sum test is reported only when both groups contain at least two estimable samples. R calculates an exact p-value for supported small-sample comparisons and otherwise uses the normal approximation. At each CpG, a sample-level Welch test requires at least two estimable independent samples per group. If it cannot be estimated, p-value and FDR are NA; the output table records the sample counts and reason. BH adjustment includes only estimable CpGs. Pooled methylation percentages are descriptive. ",
+                                              strong("Single-CpG P-values are adjusted using the Benjamini-Hochberg method. Pooled read-level inferential tests are not performed."))
                                   ),
                                   
                                   nav_panel("Heterogeneity Metrics",
@@ -1574,9 +1574,15 @@ server <- function(input, output, session) {
     s <- sanger_multi_comp()$summary
     p_value <- sanger_multi_comp()$u_test_p
     p_text <- if (is.finite(p_value)) format(p_value, digits = 4) else "not estimable"
+    method_text <- switch(
+      sanger_multi_comp()$overall_test,
+      sample_level_wilcoxon_exact = "exact Wilcoxon",
+      sample_level_wilcoxon_asymptotic = "asymptotic Wilcoxon",
+      "Wilcoxon"
+    )
     cat(sprintf(
-      "%s Mean: %.1f%%, %s Mean: %.1f%%\nSample-level Wilcoxon P-value: %s",
-      s$Group[1], s$Mean[1], s$Group[2], s$Mean[2], p_text
+      "%s Mean: %.1f%%, %s Mean: %.1f%%\nSample-level %s P-value: %s",
+      s$Group[1], s$Mean[1], s$Group[2], s$Mean[2], method_text, p_text
     ))
   })
   
@@ -2004,8 +2010,14 @@ server <- function(input, output, session) {
   output$ngs_comp_stat_txt <- renderPrint({
     req(ngs_comp_results())
     p_value <- ngs_comp_results()$u_test_p
+    method_text <- switch(
+      ngs_comp_results()$overall_test,
+      sample_level_wilcoxon_exact = "exact Wilcoxon",
+      sample_level_wilcoxon_asymptotic = "asymptotic Wilcoxon",
+      "Wilcoxon"
+    )
     cat(
-      "Sample-level Wilcoxon P-value:",
+      paste0("Sample-level ", method_text, " P-value:"),
       if (is.finite(p_value)) format(p_value, digits = 4) else "not estimable"
     )
   })

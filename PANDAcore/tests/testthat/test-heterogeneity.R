@@ -100,9 +100,58 @@ test_that("group summaries use the same call-level overall methylation definitio
   )
   expect_equal(comparison$sample_summary$Mean, c(100 / 3, 200 / 3))
   expect_equal(comparison$sample_summary$SD, c(50 / sqrt(3), 50 / sqrt(3)))
-  expect_identical(comparison$overall_test, "sample_level_wilcoxon")
+  expect_identical(
+    comparison$overall_test,
+    "sample_level_wilcoxon_exact"
+  )
+  expect_true(comparison$overall_test_exact)
+  expect_identical(
+    unname(comparison$overall_test_r_method),
+    "Wilcoxon rank sum exact test"
+  )
   expect_true(is.finite(comparison$u_test_p))
   expect_true(all(comparison$site_table$P_Value_Source == "sample_level_welch_t"))
+})
+
+test_that("small comparisons without ties use the R exact p-value", {
+  positions <- seq.int(1L, 19L, by = 2L)
+  make_proportion_sample <- function(id, methylated) {
+    make_group_sample(
+      id,
+      c(rep.int(1, methylated), rep.int(0, 10L - methylated)),
+      positions
+    )
+  }
+  group_a <- list(
+    A1 = make_proportion_sample("A1", 0L),
+    A2 = make_proportion_sample("A2", 1L),
+    A3 = make_proportion_sample("A3", 2L)
+  )
+  group_b <- list(
+    B1 = make_proportion_sample("B1", 8L),
+    B2 = make_proportion_sample("B2", 9L),
+    B3 = make_proportion_sample("B3", 10L)
+  )
+  comparison <- analyze_group_comparison(
+    group_a, group_b,
+    Biostrings::DNAString(paste(rep("CG", 10L), collapse = "")),
+    "A", "B"
+  )
+  expect_equal(comparison$u_test_p, 0.1)
+  expect_identical(comparison$overall_test, "sample_level_wilcoxon_exact")
+  expect_true(comparison$overall_test_exact)
+  expect_match(comparison$overall_test_r_method, "exact")
+})
+
+test_that("R selects the asymptotic approximation for larger comparisons", {
+  comparison <- .panda_sample_level_wilcoxon(1:50, 51:100)
+  expect_identical(comparison$method, "sample_level_wilcoxon_asymptotic")
+  expect_false(comparison$exact)
+  expect_identical(
+    unname(comparison$r_method),
+    "Wilcoxon rank sum test with continuity correction"
+  )
+  expect_true(is.finite(comparison$p.value))
 })
 
 test_that("insufficient biological replication is not replaced by read-level inference", {
