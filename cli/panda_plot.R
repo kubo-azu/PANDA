@@ -6,9 +6,9 @@ usage <- function() {
   cat(
     "PANDA plotting command\n\n",
     "Usage:\n",
-    "  Rscript cli/panda_plot.R --results RESULTS_DIR\n",
-    "  Rscript cli/panda_plot.R --results RESULTS_DIR --figures heatmap\n",
-    "  Rscript cli/panda_plot.R --results RESULTS_DIR --figures asm samples\n",
+    "  panda plot RESULTS_DIR\n",
+    "  panda plot RESULTS_DIR --figures heatmap\n",
+    "  panda plot RESULTS_DIR --figures asm samples\n",
     "  Plot types: distribution, heatmap, lollipop, asm, samples, group\n"
   )
 }

@@ -1,10 +1,13 @@
 Package: PANDAcore
 Type: Package
 Title: Core Analysis Engine for PANDA
-Version: 1.0.0
-Authors@R: person("PANDA", "Developers", role = c("aut", "cre"), email = "panda@example.org")
-Author: PANDA Developers [aut, cre]
-Maintainer: PANDA Developers <panda@example.org>
+Version: 1.0.1
+Authors@R: person(
+    given = "Azusa",
+    family = "Kubota",
+    role = c("aut", "cre"),
+    email = "kubotaexperiments@gmail.com"
+    )
 Description: Shared analysis functions for the PANDA graphical and command-line
     interfaces. The package is intended for reproducible analysis of Sanger and
     amplicon sequencing data, including sequence alignment, methylation

@@ -7,7 +7,6 @@
   "min_identity": 90,
   "min_conversion": 95,
   "workers": 8,
-  "calculate_heterogeneity": true,
   "groups": {
     "ASM (Normal)": [
       "NGS_H19_Normal_Rep1",

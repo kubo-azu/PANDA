@@ -80,8 +80,11 @@ normalize_analyze_args() {
 normalize_results_args() {
   NORMALIZED=()
   local results_seen=0
+  local help_seen=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --help|-h)
+        NORMALIZED+=("$1"); help_seen=1; shift ;;
       -r|--result-dir)
         [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 2; }
         NORMALIZED+=(--results "$2"); results_seen=1; shift 2 ;;
@@ -99,7 +102,7 @@ normalize_results_args() {
         shift ;;
     esac
   done
-  if [[ "$results_seen" -eq 0 ]]; then
+  if [[ "$results_seen" -eq 0 && "$help_seen" -eq 0 ]]; then
     echo "This command requires a results directory." >&2
     exit 2
   fi
@@ -130,7 +133,7 @@ case "$command" in
     usage
     ;;
   --version|-V|version)
-    echo "PANDA CLI 1.0.0"
+    echo "PANDA CLI 1.0.1"
     ;;
   *)
     echo "panda: unknown command: ${command}" >&2

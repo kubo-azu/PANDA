@@ -8,9 +8,9 @@ usage <- function() {
   cat(
     "PANDA group-comparison command\n\n",
     "Usage:\n",
-    "  Rscript cli/panda_compare.R --results results/run\n",
-    "  Rscript cli/panda_compare.R --results results/run --group-a sample1,sample2 --group-b sample3,sample4\n",
-    "  Rscript cli/panda_compare.R --results results/run --group-a-file groups/wt.txt --group-b-file groups/ko.txt --name-a WT --name-b KO\n\n",
+    "  panda compare RESULTS_DIR\n",
+    "  panda compare RESULTS_DIR --group-a sample1,sample2 --group-b sample3,sample4\n",
+    "  panda compare RESULTS_DIR --group-a-file groups/wt.txt --group-b-file groups/ko.txt --name-a WT --name-b KO\n\n",
     "Each group file contains one sample ID or input filename per line. Blank lines and # comments are ignored.\n",
     "If group-a/group-b are omitted, groups are read from PANDA_run_manifest.json.\n"
   )

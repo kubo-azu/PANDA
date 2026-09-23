@@ -1,5 +1,4 @@
 # PANDA heterogeneity and statistical functions
-# Extracted from app.R during CLI refactoring.
 
 # Exact abundance-weighted qFDRP calculation using coverage-pattern
 # aggregation. Count is an observed read-abundance weight, not an inferred
@@ -307,7 +306,7 @@ calculate_quma_stats <- function(res_obj, mode = "Sanger") {
   else {
     overall_meth <- mean(df_long$Methylation) * 100
     cpg_stats <- df_long %>% group_by(Position) %>% summarise(Num_Meth = sum(Methylation), 
-                                                              Num_Total = n(), Meth_Pct = mean(Methylation) * 100)
+                                                              Num_Total = dplyr::n(), Meth_Pct = mean(Methylation) * 100)
   }
   sd_cpg <- sd(cpg_stats$Meth_Pct, na.rm = T)
   se_cpg <- sd_cpg/sqrt(nrow(cpg_stats))
