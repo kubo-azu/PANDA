@@ -38,14 +38,12 @@ if (!length(args) || "--help" %in% args || "-h" %in% args) {
 }
 
 
-plot_requested <- "--plot" %in% args
-if (plot_requested) {
+if ("--plot" %in% args) {
   stop(
-    "Plotting is a separate command. Use: Rscript cli/panda_plot.R --results <output_dir>",
+    "Plotting is a separate command. Use: panda plot <output_dir>",
     call. = FALSE
   )
 }
-plot_requested <- FALSE
 
 
 arg_value <- function(flag, aliases = character()) {
@@ -305,83 +303,6 @@ if (!dir.exists(output_dir)) {
 if (!dir.exists(output_dir)) {
   stop("Could not create output directory: ", output_dir, call. = FALSE)
 }
-
-plot_top_n <- if (!is.null(config$plot_top_n)) {
-  as.integer(config$plot_top_n[[1L]])
-} else {
-  30L
-}
-if (is.na(plot_top_n) || plot_top_n < 1L) plot_top_n <- 30L
-plot_dir <- file.path(output_dir, "plots")
-if (plot_requested) dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
-
-save_sample_plots <- function(result, sample_id, plot_dir, top_n = 30L) {
-  long_data <- result$long_data
-  if (is.null(long_data) || !nrow(long_data)) return(invisible(NULL))
-  
-  read_counts <- long_data %>%
-    distinct(ReadID, Count) %>%
-    mutate(Count = ifelse(is.na(Count) | Count < 1, 1L, Count)) %>%
-    arrange(desc(Count))
-  keep_ids <- head(read_counts$ReadID, top_n)
-  plot_data <- long_data %>% filter(ReadID %in% keep_ids)
-  plot_counts <- read_counts %>% filter(ReadID %in% keep_ids)
-  safe_name <- gsub("[^A-Za-z0-9_.-]", "_", sample_id)
-  
-  read_stats <- plot_data %>%
-    group_by(ReadID) %>%
-    summarise(
-      Mean_Meth = mean(Methylation, na.rm = TRUE) * 100,
-      Count = first(Count),
-      .groups = "drop"
-    )
-  
-  p_hist <- ggplot(read_stats, aes(x = Mean_Meth, weight = Count)) +
-    geom_histogram(binwidth = 5, fill = "steelblue", color = "white") +
-    scale_x_continuous(limits = c(0, 100), breaks = seq(0, 100, 10)) +
-    theme_minimal(base_size = 12) +
-    labs(
-      title = paste0(sample_id, ": methylation distribution"),
-      subtitle = paste0("Top ", nrow(read_stats), " variants for display; metrics use the configured set"),
-      x = "Mean methylation per variant (%)", y = "Weighted read count"
-    )
-  ggsave(file.path(plot_dir, paste0(safe_name, "_methylation_distribution.pdf")),
-         p_hist, width = 8, height = 6, device = "pdf")
-  
-  plot_counts <- plot_counts %>%
-    arrange(desc(Count)) %>%
-    mutate(ymax = cumsum(Count), ymin = lag(ymax, default = 0))
-  plot_data <- plot_data %>% left_join(plot_counts, by = "ReadID")
-  p_heat <- ggplot(plot_data) +
-    geom_rect(aes(xmin = Position - 2.5, xmax = Position + 2.5,
-                  ymin = ymin, ymax = ymax, fill = factor(Methylation)),
-              color = NA) +
-    scale_fill_manual(values = c("0" = "lightblue", "1" = "firebrick"),
-                      labels = c("Unmethylated", "Methylated"), name = "Status") +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid = element_blank()) +
-    labs(title = paste0(sample_id, ": abundance heatmap (display Top-N)"),
-         x = "CpG position (bp)", y = "Cumulative read count")
-  ggsave(file.path(plot_dir, paste0(safe_name, "_abundance_heatmap.pdf")),
-         p_heat, width = 9, height = 7, device = "pdf")
-  
-  plot_data <- plot_data %>%
-    mutate(CpG_Index = match(Position, sort(unique(Position))))
-  plot_data$ReadID <- factor(plot_data$ReadID, levels = plot_counts$ReadID)
-  p_lollipop <- ggplot(plot_data, aes(x = CpG_Index, y = ReadID)) +
-    geom_line(aes(group = ReadID), color = "grey80") +
-    geom_point(aes(fill = factor(Methylation)), shape = 21, size = 3, color = "black") +
-    scale_fill_manual(values = c("0" = "white", "1" = "black"), guide = "none") +
-    theme_minimal(base_size = 10) +
-    theme(axis.text.y = element_blank(),
-          axis.text.x = element_text(angle = 90, vjust = 0.5)) +
-    labs(title = paste0(sample_id, ": methylation lollipop (display Top-N)"),
-         x = "CpG index", y = "Variant")
-  ggsave(file.path(plot_dir, paste0(safe_name, "_lollipop.pdf")),
-         p_lollipop, width = 9, height = 7, device = "pdf")
-  invisible(NULL)
-}
-
 
 min_identity <- if (!is.null(config$min_identity)) {
   as.numeric(config$min_identity[[1L]])
@@ -734,10 +655,6 @@ for (record_index in seq_len(nrow(input_records))) {
     mode = if (identical(mode, "sanger")) "Sanger" else "NGS"
   )
   
-  if (plot_requested) {
-    save_sample_plots(result, sample_id, plot_dir, top_n = plot_top_n)
-  }
-  
   analysis_records[[sample_id]] <- list(
     Sample = sample_id,
     Input = input_file,
@@ -938,28 +855,6 @@ if (!is.null(config$groups)) {
       file = file.path(output_dir, "PANDA_group_summary.csv"),
       row.names = FALSE
     )
-    if (plot_requested) {
-      metric_cols <- c(
-        "Mean_Overall_Methylation", "Mean_Amplicon_PDR",
-        "Mean_Window_Epipolymorphism", "Mean_Amplicon_qFDRP"
-      )
-      group_plot_data <- group_summary %>%
-        select(Group, all_of(metric_cols)) %>%
-        tidyr::pivot_longer(
-          cols = all_of(metric_cols),
-          names_to = "Metric",
-          values_to = "Mean"
-        ) %>%
-        mutate(Metric = sub("^Mean_", "", Metric))
-      p_group <- ggplot(group_plot_data, aes(x = Group, y = Mean, fill = Group)) +
-        geom_col() +
-        facet_wrap(~ Metric, scales = "free_y") +
-        theme_minimal(base_size = 12) +
-        theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1)) +
-        labs(title = "PANDA group means", x = NULL, y = "Mean")
-      ggsave(file.path(plot_dir, "PANDA_group_summary.pdf"),
-             p_group, width = 10, height = 7, device = "pdf")
-    }
   }
 }
 

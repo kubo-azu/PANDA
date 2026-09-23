@@ -1,6 +1,6 @@
 # 🐼 PANDA: Phased ANalysis of DNA Amplicons 🧬
 
-**Current release: 1.0.0**
+**Current release: 1.0.1**
 
 **PANDA (Phased ANalysis of DNA Amplicons)** is an R-based platform for
 phased DNA-methylation analysis from targeted bisulfite sequencing data. It
@@ -476,11 +476,10 @@ The project uses `renv`; keep `renv.lock`, `renv/activate.R`, `.Rprofile`, and
 the source files under version control. Do not commit local `results/`, logs,
 RStudio state, or the renv package library.
 
-The analysis implementation is under active development. Before publication,
-validate the current release on independent real datasets and report the
-alignment, filtering, replicate, and statistical assumptions appropriate to
-the experiment.
+When reporting analyses, record the PANDA version and the alignment, filtering,
+replicate, and statistical assumptions used for the experiment. Validate the
+workflow for the intended assay and biological setting.
 
 ## 📄 License
 
-See [PANDAcore/LICENSE](PANDAcore/LICENSE).
+PANDA is released under the MIT License. See [LICENSE](LICENSE).
