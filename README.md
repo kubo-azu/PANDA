@@ -483,3 +483,8 @@ workflow for the intended assay and biological setting.
 ## 📄 License
 
 PANDA is released under the MIT License. See [LICENSE](LICENSE).
+
+## ✏️ Contact
+
+Feel free to use [GitHub Discussions](https://github.com/kubo-azu/PANDA/discussions).
+
