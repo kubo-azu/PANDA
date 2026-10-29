@@ -377,7 +377,7 @@
     },
     "PANDAcore": {
       "Package": "PANDAcore",
-      "Version": "1.0.1",
+      "Version": "1.1.0",
       "Source": "Local",
       "Type": "Package",
       "Title": "Core Analysis Engine for PANDA",

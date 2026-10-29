@@ -57,7 +57,12 @@
 }
 
 run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
-                                    min_conversion = 95, return_alignments = TRUE, workers = 16L) {
+                                    min_conversion = 95, return_alignments = TRUE, workers = 16L,
+                                    alignment_type = "global-local",
+                                    reference_orientation = "auto") {
+  alignment_type <- match.arg(alignment_type, c("global-local", "global"))
+  reference_orientation <- match.arg(reference_orientation,
+                                     c("auto", "forward", "reverse"))
   if (methods::is(genome_seq, "DNAStringSet")) 
     genome_seq <- genome_seq[[1]]
   genome_seq <- DNAString(as.character(genome_seq))
@@ -66,11 +71,14 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
   gap_op <- -10
   gap_ext <- -4
   was_flipped <- FALSE
+  conv_fwd <- NA_real_
+  conv_rc <- NA_real_
   n_test <- min(10, length(reads_set))
   if (n_test > 0) {
     test_reads <- reads_set[1:n_test]
     test_conv <- function(test_gen) {
       test_gen_char <- as.character(test_gen)
+      test_cpg_sites <- start(matchPattern("CG", test_gen_char))
       gen_T <- chartr("C", "T", test_gen_char)
       c_conv <- 0
       c_unconv <- 0
@@ -79,12 +87,12 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
         r_F <- r
         r_F_T <- chartr("C", "T", r_F)
         aln_F <- .panda_pairwiseAlignment(pattern = r_F_T, 
-                                          subject = gen_T, type = "global", substitutionMatrix = sub_mat, 
+                                          subject = gen_T, type = alignment_type, substitutionMatrix = sub_mat,
                                           gapOpening = gap_op, gapExtension = gap_ext)
         r_R <- as.character(reverseComplement(DNAString(r)))
         r_R_T <- chartr("C", "T", r_R)
         aln_R <- .panda_pairwiseAlignment(pattern = r_R_T, 
-                                          subject = gen_T, type = "global", substitutionMatrix = sub_mat, 
+                                          subject = gen_T, type = alignment_type, substitutionMatrix = sub_mat,
                                           gapOpening = gap_op, gapExtension = gap_ext)
         if (score(aln_F) >= score(aln_R)) {
           best_aln <- aln_F
@@ -123,7 +131,8 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
             next
           orig_g_base <- substring(test_gen_char, curr_g_pos, 
                                    curr_g_pos)
-          if (orig_g_base == "C") {
+          # CpG cytosines report methylation, not bisulfite conversion.
+          if (orig_g_base == "C" && !(curr_g_pos %in% test_cpg_sites)) {
             if (p_char == "T") 
               c_conv <- c_conv + 1
             else if (p_char == "C") 
@@ -137,10 +146,20 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
     }
     conv_fwd <- test_conv(genome_seq)
     conv_rc <- test_conv(reverseComplement(genome_seq))
-    if (conv_rc > 50 && conv_rc > (conv_fwd + 20)) {
+    if (identical(reference_orientation, "reverse") ||
+        (identical(reference_orientation, "auto") &&
+         conv_rc > 50 && conv_rc > (conv_fwd + 20))) {
       genome_seq <- reverseComplement(genome_seq)
       was_flipped <- TRUE
     }
+    if (identical(reference_orientation, "auto") &&
+        (max(conv_fwd, conv_rc) <= 50 || abs(conv_fwd-conv_rc) <= 20)) {
+      warning("Reference strand assignment has low confidence; inspect strand diagnostics or set reference_orientation explicitly.",
+              call. = FALSE)
+    }
+  } else if (identical(reference_orientation, "reverse")) {
+    genome_seq <- reverseComplement(genome_seq)
+    was_flipped <- TRUE
   }
   genome_seq_char <- as.character(genome_seq)
   cpg_hits <- matchPattern("CG", genome_seq_char)
@@ -161,14 +180,14 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
     read_F <- raw_read_seq
     read_F_T <- chartr("C", "T", read_F)
     aln_F <- .panda_pairwiseAlignment(
-      pattern = read_F_T, subject = genome_T, type = "global",
+      pattern = read_F_T, subject = genome_T, type = alignment_type,
       substitutionMatrix = sub_mat,
       gapOpening = gap_op, gapExtension = gap_ext
     )
     read_R <- reverseComplement(raw_read_seq)
     read_R_T <- chartr("C", "T", read_R)
     aln_R <- .panda_pairwiseAlignment(
-      pattern = read_R_T, subject = genome_T, type = "global",
+      pattern = read_R_T, subject = genome_T, type = alignment_type,
       substitutionMatrix = sub_mat,
       gapOpening = gap_op, gapExtension = gap_ext
     )
@@ -177,6 +196,10 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
     } else {
       best_aln <- aln_R; final_read_seq <- read_R; strand <- "Reverse"
     }
+    aligned_start <- as.integer(start(subject(best_aln)))
+    aligned_end <- as.integer(pwalign::end(subject(best_aln)))
+    supplied_start <- if (was_flipped) nchar(genome_seq_char)-aligned_end+1L else aligned_start
+    supplied_end <- if (was_flipped) nchar(genome_seq_char)-aligned_start+1L else aligned_end
     aln_pat_converted <- as.character(pattern(best_aln))
     raw_bases <- strsplit(as.character(final_read_seq), "")[[1]]
     aln_template <- strsplit(aln_pat_converted, "")[[1]]
@@ -230,6 +253,9 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
       pairwise <- character()
     }
     list(read_summary = data.frame(ReadID = read_name, Strand = strand,
+                                   Reference_Start = supplied_start,
+                                   Reference_End = supplied_end,
+                                   Reference_Flipped = was_flipped,
                                    Mismatches = aln_len - n_match, Gaps = total_gaps,
                                    Identity_Pct = round(identity_score, 1), Meth_Pct = meth_pct,
                                    Conv_Pct = round(conv_rate, 1), CpG_Count = cpg_count,
@@ -309,7 +335,15 @@ run_bisulfite_alignment <- function(genome_seq, reads_set, min_identity = 90,
       excluded = n_excluded
     ),
     alignments = list(pairwise = pairwise_txt_list, multi = multi_align_seqs),
-    was_flipped = was_flipped
+    was_flipped = was_flipped,
+    strand_diagnostics = list(
+      tested_variants = n_test, forward_conversion_pct = conv_fwd,
+      reverse_conversion_pct = conv_rc,
+      reference_orientation = reference_orientation,
+      alignment_type = alignment_type,
+      low_confidence = identical(reference_orientation, "auto") && n_test > 0L &&
+        (max(conv_fwd, conv_rc) <= 50 || abs(conv_fwd-conv_rc) <= 20)
+    )
   ))
 }
 

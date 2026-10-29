@@ -3,7 +3,8 @@
 `PANDAcore` is the shared R package layer for the PANDA platform. It contains
 the non-UI functions used by the command-line workflow, including:
 
-- bisulfite-aware global alignment through `pwalign`;
+- bisulfite-aware `global-local` alignment through `pwalign` by default,
+  with historical `global` scoring available for comparison;
 - FASTA/FASTQ/AB1 input handling and read dereplication;
 - methylation statistics and CpG-level summaries; and
 - PDR, window epipolymorphism, qFDRP, and ASM clustering calculations.

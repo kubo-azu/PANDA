@@ -62,7 +62,9 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
                                     min_identity = 90,
                                     min_conversion = 95,
                                     return_alignments = TRUE,
-                                    workers = 16L) {
+                                    workers = 16L,
+                                    alignment_type = "global-local",
+                                    reference_orientation = "auto") {
   ## Force all Shiny inputs in the parent process before creating workers.
   ## Otherwise a lazy promise such as input$ngs_ident can be evaluated inside
   ## a worker, where no reactive context exists.
@@ -78,7 +80,9 @@ run_bisulfite_alignment <- function(genome_seq, reads_set,
     min_identity = min_identity,
     min_conversion = min_conversion,
     return_alignments = return_alignments,
-    workers = workers
+    workers = workers,
+    alignment_type = alignment_type,
+    reference_orientation = reference_orientation
   )
 }
 
@@ -371,7 +375,7 @@ create_diff_plot <- function(site_table, g1_name="Group 1", g2_name="Group 2") {
 # 2. UI (Frontend)
 # ==============================================================================
 ui <- page_navbar(
-  title = "PANDA (v1.0.1)",
+  title = "PANDA (v1.1.0)",
   theme = bs_theme(bootswatch = "minty"),
   header = shinyjs::useShinyjs(),
   
@@ -666,6 +670,8 @@ ui <- page_navbar(
                                      verbatimTextOutput("sanger_file_count_txt"),
                                      hr(),
                                      sliderInput("sanger_conv", "Min Conversion (%)", 0, 100, 95), sliderInput("sanger_ident", "Min Identity (%)", 0, 100, 90),
+                                     selectInput("sanger_alignment_type", "Alignment", choices=c("End-free (global-local)"="global-local", "Historical global"="global")),
+                                     selectInput("sanger_reference_orientation", "Reference orientation", choices=c("Auto"="auto", "Forward"="forward", "Reverse"="reverse")),
                                      
                                      hr(),
                                      h5("Motif Filter (Optional)"),
@@ -755,6 +761,8 @@ ui <- page_navbar(
                     numericInput("ngs_min_window_coverage", "Minimum retained-read coverage per 4-CpG window", value = 2, min = 1, step = 1),
                     numericInput("ngs_workers", "Alignment workers (parallel)", value = min(.panda_workers, 16L), min = 1, max = 16, step = 1),
                     sliderInput("ngs_conv", "Min Conversion", 0, 100, 95), sliderInput("ngs_ident", "Min Identity", 0, 100, 90),
+                    selectInput("ngs_alignment_type", "Alignment", choices=c("End-free (global-local)"="global-local", "Historical global"="global")),
+                    selectInput("ngs_reference_orientation", "Reference orientation", choices=c("Auto"="auto", "Forward"="forward", "Reverse"="reverse")),
                     
                     hr(),
                     h5("Motif Filter (Optional)"),
@@ -1055,8 +1063,10 @@ server <- function(input, output, session) {
           register_temp_files(input$sanger_single_ab1$datapath)
           reads <- process_ab1_files(input$sanger_single_ab1$datapath, input$sanger_single_ab1$name, input$ab1_trim_start, input$ab1_trim_end) 
         }
-        incProgress(0.6, detail = "Aligning..."); res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE) 
+        incProgress(0.6, detail = "Aligning..."); res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE,
+          alignment_type=input$sanger_alignment_type, reference_orientation=input$sanger_reference_orientation)
         if(isTRUE(res$was_flipped)) showNotification("Reference automatically flipped to Reverse Complement.", type="warning", duration=10)
+        if(isTRUE(res$strand_diagnostics$low_confidence)) showNotification("Reference orientation is uncertain; inspect strand settings.", type="warning", duration=10)
         
         sanger_single_res(res)
         sanger_single_het(calculate_heterogeneity(
@@ -1113,8 +1123,10 @@ server <- function(input, output, session) {
           }
           
           if (length(reads) > 0) {
-            res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE) 
+            res <- run_bisulfite_alignment(genome, reads, input$sanger_ident, input$sanger_conv, return_alignments = TRUE,
+              alignment_type=input$sanger_alignment_type, reference_orientation=input$sanger_reference_orientation)
             if(!is.null(res)) { 
+              if(isTRUE(res$strand_diagnostics$low_confidence)) showNotification("Reference orientation is uncertain; inspect strand settings.", type="warning", duration=10)
               nm <- files$name[i]; res_list[[nm]] <- res
               het <- calculate_heterogeneity(
                 res,
@@ -1376,11 +1388,14 @@ server <- function(input, output, session) {
               input$ngs_ident,
               input$ngs_conv,
               return_alignments = TRUE,
-              workers = workers
+              workers = workers,
+              alignment_type = input$ngs_alignment_type,
+              reference_orientation = input$ngs_reference_orientation
             )
             
             if(!is.null(res)) {
               if(isTRUE(res$was_flipped)) showNotification(paste(files$name[i], ": Reference automatically flipped to Reverse Complement."), type="warning", duration=10)
+              if(isTRUE(res$strand_diagnostics$low_confidence)) showNotification(paste(files$name[i], ": Reference orientation is uncertain; inspect strand settings."), type="warning", duration=10)
               
               if (is_unmerged_paired) {
                 res$read_summary <- res$read_summary %>%

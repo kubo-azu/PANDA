@@ -254,24 +254,76 @@ for (sample_id in names(sample_records)) {
         if (!is.null(names(cl))) cl <- as.integer(cl[ids]) else cl <- as.integer(cl)
       }
       if (is.null(cl) || length(cl) != length(ids) || anyNA(cl)) cl <- rep(1L, length(ids))
-      row_order <- order(cl, rowMeans(mat, na.rm = TRUE))
-      long_asm <- as.data.frame(mat[row_order, , drop = FALSE], check.names = FALSE) %>%
-        mutate(ReadID = ids[row_order], Cluster = factor(cl[row_order])) %>%
-        tidyr::pivot_longer(cols = -c(ReadID, Cluster), names_to = "Position", values_to = "Methylation")
-      long_asm$Position <- factor(long_asm$Position, levels = colnames(mat))
-      p_asm <- ggplot(long_asm, aes(x = Position, y = ReadID, fill = factor(Methylation))) +
-        geom_tile(color = "white", linewidth = 0.15) +
-        scale_fill_manual(values = c("0" = "lightblue", "1" = "firebrick"), na.value = "grey90",
-                          breaks = c("1", "0"), labels = c("Methylated", "Unmethylated"), name = "Status") +
-        facet_grid(Cluster ~ ., scales = "free_y", space = "free_y", switch = "y") +
-        theme_minimal(base_size = 14) +
-        theme(axis.text.y = element_blank(), panel.grid = element_blank(),
-              axis.text.x = element_text(angle = 90, vjust = 0.5, size = 11),
-              strip.text.y.left = element_text(angle = 0)) +
-        labs(title = paste0(sample_id, ": ASM profile (k-means clusters)"),
-             x = "CpG position (sequential)", y = "Reads")
+      if (nrow(mat) <= 80L) {
+        # A read-level heatmap remains legible when each variant has enough
+        # vertical space. Clusters only order the rows; they are not alleles.
+        mean_meth <- rowMeans(mat, na.rm = TRUE)
+        mean_meth[!is.finite(mean_meth)] <- NA_real_
+        row_order <- order(cl, mean_meth, na.last = TRUE)
+        long_asm <- as.data.frame(mat[row_order, , drop = FALSE], check.names = FALSE) %>%
+          mutate(ReadID = ids[row_order], Cluster = factor(cl[row_order])) %>%
+          tidyr::pivot_longer(cols = -c(ReadID, Cluster),
+                              names_to = "Position", values_to = "Methylation")
+        long_asm$Position <- factor(long_asm$Position, levels = colnames(mat))
+        long_asm$ReadID <- factor(long_asm$ReadID, levels = rev(ids[row_order]))
+        p_asm <- ggplot(long_asm, aes(x = Position, y = ReadID,
+                                      fill = factor(Methylation))) +
+          geom_tile(color = "white", linewidth = 0.1) +
+          scale_fill_manual(values = c("0" = "lightblue", "1" = "firebrick"),
+                            na.value = "grey90", breaks = c("1", "0"),
+                            labels = c("Methylated", "Unmethylated"), name = "Status") +
+          facet_grid(Cluster ~ ., scales = "free_y", space = "free_y", switch = "y") +
+          theme_minimal(base_size = 13) +
+          theme(axis.text.y = element_blank(), panel.grid = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, size = 10),
+                strip.text.y.left = element_text(angle = 0)) +
+          labs(title = paste0(sample_id, ": read-level CpG patterns"),
+               subtitle = "Rows ordered by exploratory k-means clusters; clusters are not allele assignments",
+               x = "CpG position", y = "Sequence variants")
+        plot_height <- max(6, min(14, 3 + 0.18 * length(ids)))
+      } else {
+        # Thousands of one-pixel rows make a read-level PDF unreadable. Show
+        # the observed, Count-weighted methylation rate for each cluster and
+        # CpG instead. Missing calls do not enter a site's denominator.
+        read_weights <- counts$Count[match(ids, counts$ReadID)]
+        read_weights[!is.finite(read_weights) | read_weights < 1] <- 1
+        cluster_ids <- sort(unique(cl))
+        cluster_reads <- vapply(cluster_ids, function(z) sum(read_weights[cl == z]), numeric(1))
+        cluster_labels <- paste0(
+          "Cluster ", cluster_ids, " (", format(cluster_reads, big.mark = ",", trim = TRUE),
+          " reads; ", round(100 * cluster_reads / sum(cluster_reads)), "%)"
+        )
+        cluster_profile <- do.call(rbind, lapply(seq_along(cluster_ids), function(ii) {
+          keep_rows <- cl == cluster_ids[[ii]]
+          rates <- vapply(seq_len(ncol(mat)), function(jj) {
+            observed <- keep_rows & is.finite(mat[, jj])
+            if (!any(observed)) return(NA_real_)
+            100 * weighted.mean(mat[observed, jj], read_weights[observed])
+          }, numeric(1))
+          data.frame(Cluster = cluster_labels[[ii]], Position = colnames(mat),
+                     Methylation = rates, stringsAsFactors = FALSE)
+        }))
+        cluster_profile$Cluster <- factor(cluster_profile$Cluster,
+                                          levels = rev(cluster_labels))
+        cluster_profile$Position <- factor(cluster_profile$Position,
+                                           levels = colnames(mat))
+        p_asm <- ggplot(cluster_profile,
+                        aes(x = Position, y = Cluster, fill = Methylation)) +
+          geom_tile(color = "white", linewidth = 0.25) +
+          scale_fill_gradient2(low = "lightblue", mid = "white", high = "firebrick",
+                               midpoint = 50, limits = c(0, 100), na.value = "grey90",
+                               name = "Methylated (%)") +
+          theme_minimal(base_size = 13) +
+          theme(panel.grid = element_blank(),
+                axis.text.x = element_text(angle = 90, vjust = 0.5, size = 10)) +
+          labs(title = paste0(sample_id, ": CpG profiles by k-means cluster"),
+               subtitle = paste0(length(ids), " unique variants; observed CpGs weighted by read count.\n",
+                                 "Exploratory clusters are not allele assignments."),
+               x = "CpG position", y = NULL)
+        plot_height <- 6
+      }
       ggsave(file.path(plot_dir, paste0(safe_name, "_asm.pdf")), p_asm,
-             width = 9, height = max(6, min(12, 5 + 0.015 * length(ids))), device = pdf_device)
+             width = 10, height = plot_height, device = pdf_device)
     }
   }
 }

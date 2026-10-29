@@ -1,6 +1,6 @@
 # 🐼 PANDA: Phased ANalysis of DNA Amplicons 🧬
 
-**Current release: 1.0.1**
+**Current release: 1.1.0**
 
 **PANDA (Phased ANalysis of DNA Amplicons)** is an R-based platform for
 phased DNA-methylation analysis from targeted bisulfite sequencing data. It
@@ -24,10 +24,11 @@ heterogeneity.
 - **Sanger mode** for FASTA and AB1-derived clonal sequences.
 - **Amplicon-NGS mode** for FASTA/FASTQ data, dereplication, read-count
   weighting, and optional paired-end handling.
-- **Global bisulfite-aware alignment** using `pwalign`, with explicit identity
-  and conversion filters.
-- **Phased methylation views** including lollipop plots, ASM profiles, and a
-  count-weighted binned abundance heatmap.
+- **Bisulfite-aware alignment** using `pwalign`, with end-free
+  `global-local` alignment for partial reads by default and a `global`
+  comparison option, plus explicit identity and conversion filters.
+- **Phased methylation views** including lollipop plots, a count-weighted
+  binned abundance heatmap, and exploratory CpG-pattern clustering plots.
 - **Heterogeneity metrics** including PDR, window epipolymorphism, and qFDRP.
 - **In-silico haplotype filtering** from motifs supplied directly or through a
   one-motif-per-line text file.
@@ -44,6 +45,23 @@ The released demonstration datasets are ready to analyze. The optional
 package only when regenerating those datasets from scratch; this large
 genome-generation dependency is intentionally excluded from the standard
 PANDA installation.
+
+## What changed in 1.1.0
+
+- `global-local` is the default alignment mode. It aligns a complete read to
+  part of the amplicon reference without penalizing unobserved reference ends.
+  The earlier `global` mode remains available through `--alignment-type`.
+- Automatic reference orientation uses conversion at non-CpG cytosines.
+  Low-confidence assignments produce a warning, and `--reference-orientation`
+  can set the orientation explicitly.
+- The CLI records input-to-variant mappings, individual read-end summaries,
+  and strand diagnostics. These help trace dereplication and unmerged R1/R2
+  coordinate linkage.
+- Heterogeneity calculations retain observed read-count weighting by default.
+  `--heterogeneity-weighting variants` provides an equal-variant alternative.
+- The CLI's `asm` plot adapts to sample size: small sets show individual
+  sequence variants, while large sets show read-count-weighted CpG profiles
+  for each exploratory cluster. Cluster labels do not identify alleles.
 
 ## 🧩 Platform layout
 
@@ -217,9 +235,10 @@ Rscript -e 'shiny::runApp("app.R")'
 ```
 
 The GUI supports single-sample and batch workflows for Sanger and amplicon-NGS
-data, motif filtering, ASM visualization, heterogeneity statistics, and group
-comparison. The GUI is useful for interactive exploration; the CLI is intended
-for scripted or server-side analyses.
+data, motif filtering, exploratory methylation-pattern visualization,
+heterogeneity statistics, and group comparison. The GUI is useful for
+interactive exploration; the CLI is intended for scripted or server-side
+analyses.
 
 ## 💻 CLI workflow
 
@@ -257,6 +276,9 @@ The main analysis options are:
 | `--output-dir` | directory for all result files | `panda_cli_results` |
 | `--min-identity` | minimum alignment identity (%) | `90` |
 | `--min-conversion` | minimum bisulfite conversion (%) | `95` |
+| `--alignment-type` | `global-local` (complete read against a reference subsequence) or historical `global` | `global-local` |
+| `--reference-orientation` | heuristic `auto`, forced `forward`, or forced `reverse` | `auto` |
+| `--heterogeneity-weighting` | observed read counts (`reads`) or one vote per retained sequence variant (`variants`) | `reads` |
 | `--min-count` | minimum NGS multiplicity | `1` |
 | `--min-shared-cpg` | minimum CpGs shared by a read pair for amplicon qFDRP | `4` |
 | `--min-window-coverage` | minimum retained-read/clone coverage for a 4-CpG epipolymorphism window | `2` |
@@ -296,9 +318,37 @@ min_count          1
 min_shared_cpg     4
 min_window_coverage 2
 read_mode          merged
+alignment_type     global-local
+reference_orientation auto
+heterogeneity_weighting reads
 max_reads          all reads
 workers            16
 ```
+
+`global-local` aligns every base of a read to a contiguous portion of the
+amplicon. Unobserved reference ends are not charged gap penalties, which is
+important for unmerged R1/R2 reads shorter than the reference. Use
+`--alignment-type global` to reproduce the previous scoring in a controlled
+comparison. The alignment read summary reports start and end coordinates in
+the **supplied FASTA** orientation. CpG positions in the methylation output
+follow the internally oriented reference; `*_strand_diagnostics.csv` records
+whether the reference was flipped.
+
+Automatic strand selection evaluates up to ten representative sequence
+variants. PANDA flips the reference only when reverse-orientation non-CpG
+conversion exceeds 50% and is more than 20 percentage points higher than the
+forward estimate. These thresholds are conservative heuristics, not calibrated
+probabilities. PANDA warns when neither orientation exceeds 50% or the
+estimates differ by at most 20 points. The CLI and GUI allow an explicit
+orientation override for ambiguous cases.
+
+NGS heterogeneity metrics use observed retained-read counts by default.
+`--heterogeneity-weighting variants` gives each retained distinct sequence
+variant one vote; this is an analytical sensitivity check, not an estimate of
+the number of original molecules. The CLI saves an `*_input_read_map.csv`
+linking input read IDs to dereplicated variants, an `*_end_read_summary.csv`
+for individual R1/R2 alignments, and strand diagnostics alongside the usual
+summaries. The run manifest records the alignment and weighting settings.
 
 For long projects or batch reruns, the same options can be stored in a JSON,
 YAML, or YML configuration file and passed as one argument. This is optional;
@@ -339,13 +389,21 @@ Available figure names are:
 distribution   methylation distribution
 heatmap        binned abundance heatmap
 lollipop       top-N abundance-ranked methylation patterns
-asm            per-sample ASM cluster profile
+asm            exploratory CpG-pattern clusters (read-level or summarized)
 samples        per-sample overall methylation summary
 group          configured group means and SDs
 ```
 
 `--top-n` is a display option for lollipop plots. It does not change the
 analysis or heterogeneity metrics.
+
+The `asm` figure keeps its command name and `_asm.pdf` filename for
+compatibility. When there are at most 80 distinct sequence variants, it shows
+their CpG calls as individual rows ordered by k-means cluster. For larger
+samples, it shows the read-count-weighted methylation percentage at each CpG
+within each cluster, together with the cluster's read count and share of the
+sample. Clustering is exploratory; these groups are not allele assignments or
+independent evidence of allele-specific methylation.
 
 ### 3. Compare groups
 
@@ -487,4 +545,3 @@ PANDA is released under the MIT License. See [LICENSE](LICENSE).
 ## ✏️ Contact
 
 Feel free to use [GitHub Discussions](https://github.com/kubo-azu/PANDA/discussions).
-

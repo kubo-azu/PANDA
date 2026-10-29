@@ -17,6 +17,8 @@ usage <- function() {
       "Common options:\n",
       "  --reference-target NAME  --output-dir DIR  --min-identity N\n",
       "  --min-conversion N  --min-count N  --workers N\n",
+      "  --alignment-type global-local|global  --reference-orientation auto|forward|reverse\n",
+      "  --heterogeneity-weighting reads|variants\n",
       "  --read-mode merged|unmerged  --max-reads N  --max-unique-reads N\n",
       "  --motif-file motifs.txt (one motif per line; all motifs required)\n",
       "  --motifs MOTIF[,MOTIF...]  --ab1-trim-start N  --ab1-trim-end N\n",
@@ -91,6 +93,9 @@ reference_direct <- arg_value("--reference", "-r")
 reference_target_direct <- arg_value("--reference-target")
 min_identity_direct <- arg_value("--min-identity")
 min_conversion_direct <- arg_value("--min-conversion")
+alignment_type_direct <- arg_value("--alignment-type")
+reference_orientation_direct <- arg_value("--reference-orientation")
+heterogeneity_weighting_direct <- arg_value("--heterogeneity-weighting")
 min_count_direct <- arg_value("--min-count")
 workers_direct <- arg_value("--workers")
 read_mode_direct <- arg_value("--read-mode")
@@ -160,6 +165,9 @@ direct_fields <- list(
   reference_target = reference_target_direct,
   min_identity = min_identity_direct,
   min_conversion = min_conversion_direct,
+  alignment_type = alignment_type_direct,
+  reference_orientation = reference_orientation_direct,
+  heterogeneity_weighting = heterogeneity_weighting_direct,
   min_count = min_count_direct,
   workers = workers_direct,
   read_mode = read_mode_direct,
@@ -315,6 +323,18 @@ min_conversion <- if (!is.null(config$min_conversion)) {
 } else {
   95
 }
+alignment_type <- if (!is.null(config$alignment_type))
+  as.character(config$alignment_type[[1L]]) else "global-local"
+if (!alignment_type %in% c("global-local", "global"))
+  stop("alignment_type must be 'global-local' or 'global'.", call. = FALSE)
+reference_orientation <- if (!is.null(config$reference_orientation))
+  as.character(config$reference_orientation[[1L]]) else "auto"
+if (!reference_orientation %in% c("auto", "forward", "reverse"))
+  stop("reference_orientation must be auto, forward, or reverse.", call. = FALSE)
+heterogeneity_weighting <- if (!is.null(config$heterogeneity_weighting))
+  as.character(config$heterogeneity_weighting[[1L]]) else "reads"
+if (!heterogeneity_weighting %in% c("reads", "variants"))
+  stop("heterogeneity_weighting must be 'reads' or 'variants'.", call. = FALSE)
 
 max_reads <- if (!is.null(config$max_reads)) {
   as.integer(config$max_reads[[1L]])
@@ -489,13 +509,21 @@ for (record_index in seq_len(nrow(input_records))) {
     }
     reads <- reads[seq_len(n_pair)]
     reads_r2 <- reads_r2[seq_len(n_pair)]
+    input_r1_ids <- names(reads)
+    input_r2_ids <- names(reads_r2)
+    if (is.null(input_r1_ids)) input_r1_ids <- paste0("Input", seq_len(n_pair), "/1")
+    if (is.null(input_r2_ids)) input_r2_ids <- paste0("Input", seq_len(n_pair), "/2")
     reads_r2_rc <- as.character(Biostrings::reverseComplement(reads_r2))
     pair_strings <- paste(as.character(reads), reads_r2_rc, sep = "---PAIR---")
+    selected <- seq_len(n_pair)
+    input_status <- rep("analyzed", n_pair)
     raw_input_n <- length(pair_strings)
     if (length(motifs) > 0L) {
       keep <- vapply(pair_strings, function(x) {
         all(vapply(motifs, function(m) grepl(m, toupper(x), fixed = TRUE), logical(1)))
       }, logical(1))
+      input_status[selected[!keep]] <- "motif_filtered"
+      selected <- selected[keep]
       pair_strings <- pair_strings[keep]
     }
     motif_retained_n <- length(pair_strings)
@@ -503,13 +531,23 @@ for (record_index in seq_len(nrow(input_records))) {
       warning("No paired reads remained after filtering: ", sample_id)
       next
     }
-    if (is.finite(max_reads) && length(pair_strings) > max_reads) pair_strings <- pair_strings[seq_len(max_reads)]
+    if (is.finite(max_reads) && length(pair_strings) > max_reads) {
+      input_status[selected[-seq_len(max_reads)]] <- "read_cap"
+      selected <- selected[seq_len(max_reads)]
+      pair_strings <- pair_strings[seq_len(max_reads)]
+    }
     pair_counts <- sort(table(pair_strings), decreasing = TRUE)
     pair_counts <- pair_counts[pair_counts >= min_count]
     if (!length(pair_counts)) {
       warning("No paired reads met min_count for: ", sample_id)
       next
     }
+    variant_ids <- paste0("Rank", seq_along(pair_counts), "_Count", as.integer(pair_counts))
+    input_variant <- rep(NA_character_, n_pair)
+    input_variant[selected] <- variant_ids[match(pair_strings, names(pair_counts))]
+    input_status[selected[is.na(input_variant[selected])]] <- "below_min_count"
+    input_map <- data.frame(Input_R1_ID=input_r1_ids, Input_R2_ID=input_r2_ids,
+                            Variant_ID=input_variant, Input_Status=input_status)
     expanded_sequences <- character(2L * length(pair_counts))
     expanded_names <- character(2L * length(pair_counts))
     for (jj in seq_along(pair_counts)) {
@@ -526,11 +564,18 @@ for (record_index in seq_len(nrow(input_records))) {
                          raw_n = raw_read_n, unique_n = length(pair_counts))
   } else {
     raw_input_n <- length(reads)
+    input_ids <- names(reads)
+    if (is.null(input_ids)) input_ids <- paste0(sample_id, "_Read", seq_len(raw_input_n))
+    input_strings <- as.character(reads)
+    selected <- seq_len(raw_input_n)
+    input_status <- rep("analyzed", raw_input_n)
     if (length(motifs) > 0L) {
       read_strings <- toupper(as.character(reads))
       keep <- vapply(read_strings, function(x) {
         all(vapply(motifs, function(m) grepl(m, x, fixed = TRUE), logical(1)))
       }, logical(1))
+      input_status[selected[!keep]] <- "motif_filtered"
+      selected <- selected[keep]
       reads <- reads[keep]
     }
     motif_retained_n <- length(reads)
@@ -538,7 +583,11 @@ for (record_index in seq_len(nrow(input_records))) {
       warning("No reads found in: ", input_file)
       next
     }
-    if (is.finite(max_reads) && length(reads) > max_reads) reads <- reads[seq_len(max_reads)]
+    if (is.finite(max_reads) && length(reads) > max_reads) {
+      input_status[selected[-seq_len(max_reads)]] <- "read_cap"
+      selected <- selected[seq_len(max_reads)]
+      reads <- reads[seq_len(max_reads)]
+    }
     if (is.null(names(reads)) || any(!nzchar(names(reads)))) {
       names(reads) <- paste0(sample_id, "_Read", seq_along(reads))
     }
@@ -556,6 +605,15 @@ for (record_index in seq_len(nrow(input_records))) {
       )
       reads <- dereplicated$reads
     }
+    input_variant <- rep(NA_character_, raw_input_n)
+    if (identical(mode, "sanger")) {
+      input_variant[selected] <- names(reads)
+    } else {
+      input_variant[selected] <- names(reads)[match(input_strings[selected], as.character(reads))]
+      input_status[selected[is.na(input_variant[selected])]] <- "below_min_count_or_unique_cap"
+    }
+    input_map <- data.frame(Input_R1_ID=input_ids, Input_R2_ID=NA_character_,
+                            Variant_ID=input_variant, Input_Status=input_status)
   }
 
   if (length(motifs) > 0L) {
@@ -589,6 +647,8 @@ for (record_index in seq_len(nrow(input_records))) {
     reads_set = reads,
     min_identity = min_identity,
     min_conversion = min_conversion,
+    alignment_type = alignment_type,
+    reference_orientation = reference_orientation,
     return_alignments = TRUE,
     workers = workers
   )
@@ -597,6 +657,7 @@ for (record_index in seq_len(nrow(input_records))) {
     warning("No result was generated for: ", sample_id)
     next
   }
+  end_read_summary <- result$read_summary
   
   # Alignment is performed on one representative per unique sequence.
   # For unmerged pairs, reproduce GUI behavior by collapsing R1/R2 rows back
@@ -607,6 +668,9 @@ for (record_index in seq_len(nrow(input_records))) {
       group_by(BaseID) %>%
       summarise(
         Strand = paste(unique(Strand), collapse = "/"),
+        Reference_Start = min(Reference_Start),
+        Reference_End = max(Reference_End),
+        Reference_Flipped = any(Reference_Flipped),
         Mismatches = sum(Mismatches), Gaps = sum(Gaps),
         Identity_Pct = mean(Identity_Pct), Meth_Pct = mean(Meth_Pct, na.rm = TRUE),
         Conv_Pct = mean(Conv_Pct), CpG_Count = sum(CpG_Count),
@@ -618,6 +682,12 @@ for (record_index in seq_len(nrow(input_records))) {
     result$long_data <- result$long_data %>% filter(!ReadID %in% excluded_ids)
     if (!is.null(result$counts$total)) result$counts$total <- result$counts$total / 2
   }
+  input_map$PANDA_QC <- NA_character_
+  mapped <- !is.na(input_map$Variant_ID)
+  qc_idx <- match(input_map$Variant_ID[mapped], result$read_summary$ReadID)
+  input_map$PANDA_QC[mapped] <- ifelse(
+    is.na(qc_idx), "no_alignment",
+    ifelse(grepl("^excluded", result$read_summary$Pattern[qc_idx]), "excluded", "passed"))
 
   # Attach the multiplicity so downstream summaries can use read-level weight.
   if (!is.null(result$long_data) && nrow(result$long_data) > 0L) {
@@ -641,8 +711,13 @@ for (record_index in seq_len(nrow(input_records))) {
       left_join(count_map, by = "ReadID")
   }
   
+  heterogeneity_input <- result
+  if (identical(heterogeneity_weighting, "variants") &&
+      !is.null(heterogeneity_input$long_data) && nrow(heterogeneity_input$long_data)) {
+    heterogeneity_input$long_data$Count <- 1L
+  }
   heterogeneity <- PANDAcore::calculate_heterogeneity(
-    result,
+    heterogeneity_input,
     min_shared_cpg = min_shared_cpg,
     min_window_coverage = min_window_coverage,
     cluster_method = cluster_method,
@@ -660,6 +735,8 @@ for (record_index in seq_len(nrow(input_records))) {
     Input = input_file,
     long_data = result$long_data,
     read_summary = result$read_summary,
+    end_read_summary = end_read_summary,
+    strand_diagnostics = result$strand_diagnostics,
     genome_info = result$genome_info,
     alignments = result$alignments,
     heterogeneity = heterogeneity$scores,
@@ -691,6 +768,15 @@ for (record_index in seq_len(nrow(input_records))) {
     ),
     row.names = FALSE
   )
+  write.csv(end_read_summary,
+    file=file.path(output_dir, paste0(safe_name, "_end_read_summary.csv")),
+    row.names=FALSE)
+  write.csv(input_map,
+    file=file.path(output_dir, paste0(safe_name, "_input_read_map.csv")),
+    row.names=FALSE)
+  write.csv(as.data.frame(result$strand_diagnostics),
+    file=file.path(output_dir, paste0(safe_name, "_strand_diagnostics.csv")),
+    row.names=FALSE)
 
   if (!is.null(result$alignments$pairwise)) {
     writeLines(
@@ -754,12 +840,23 @@ for (record_index in seq_len(nrow(input_records))) {
     Motif_File = if (!is.null(motif_file)) motif_file else "",
     Unique_Sequences = dereplicated$unique_n,
     Retained_Reads = sum(dereplicated$counts),
+    Retained_Reads_Stage = "before_alignment_qc",
+    Retained_Reads_Unit = if (paired_mode) "read ends" else
+      if (identical(mode, "sanger")) "clones" else "reads",
+    QC_Passed_Input_Units = sum(input_map$PANDA_QC == "passed", na.rm = TRUE),
+    QC_Passed_Input_Unit = if (paired_mode) "read pairs" else
+      if (identical(mode, "sanger")) "clones" else "reads",
     Min_Count = min_count,
+    PANDAcore_Version = as.character(utils::packageVersion("PANDAcore")),
+    Alignment_Type = alignment_type,
+    Reference_Orientation = reference_orientation,
+    Heterogeneity_Weighting = heterogeneity_weighting,
     Min_Shared_CpGs = min_shared_cpg,
     Min_Window_Coverage = min_window_coverage,
     Aligned_Records = nrow(result$read_summary),
     Passed = sum(passed, na.rm = TRUE),
     Overall_Methylation = statistics$overall,
+    Overall_Methylation_Status = statistics$status,
     Amplicon_PDR = heterogeneity$scores$Value[
       heterogeneity$scores$Metric == "Amplicon PDR"
     ],
@@ -859,7 +956,8 @@ if (!is.null(config$groups)) {
 }
 
 analysis_bundle <- list(
-  schema_version = "0.3",
+  schema_version = "0.4",
+  panda_core_version = as.character(utils::packageVersion("PANDAcore")),
   generated_at = format(Sys.time(), tz = "UTC"),
   parameters = list(
     mode = mode,
@@ -868,6 +966,9 @@ analysis_bundle <- list(
     read_mode = read_mode,
     min_identity = min_identity,
     min_conversion = min_conversion,
+    alignment_type = alignment_type,
+    reference_orientation = reference_orientation,
+    heterogeneity_weighting = heterogeneity_weighting,
     min_count = min_count,
     motifs = motifs,
     motif_file = motif_file,

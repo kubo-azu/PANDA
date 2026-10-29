@@ -149,7 +149,10 @@ calculate_heterogeneity <- function(res_obj, min_shared_cpg = 4L,
   )
   if (is.null(df_long) || nrow(df_long) == 0 || length(cpg_sites) == 
       0) 
-    return(list(scores = empty_scores, meth_mat = matrix(NA), 
+    return(list(scores = empty_scores,
+                meth_mat = matrix(numeric(), nrow = 0L,
+                                  ncol = length(cpg_sites),
+                                  dimnames = list(character(), as.character(cpg_sites))),
                 clusters = NULL, pdr_by_cpg = data.frame(), epipolymorphism_by_window = data.frame(), 
                 qfdrp_by_cpg = data.frame(),
                 qfdrp_shared_cpg_distribution = data.frame()))
@@ -285,9 +288,20 @@ calculate_quma_stats <- function(res_obj, mode = "Sanger") {
   df_summary <- res_obj$read_summary %>% filter(!str_detect(Pattern, 
                                                             "^excluded"))
   cpg_sites <- res_obj$genome_info$cpg_pos
-  if (nrow(df_summary) == 0) 
-    return(list(overall = 0, sd_cpg = 0, se_cpg = 0, sd_seq = 0, 
-                se_seq = 0, cpg_table = data.frame()))
+  if (nrow(df_summary) == 0L || is.null(df_long) || nrow(df_long) == 0L) {
+    empty_cpg_stats <- data.frame(
+      Position = if (length(cpg_sites)) cpg_sites else numeric(),
+      Num_Meth = rep(0L, length(cpg_sites)),
+      Num_Total = rep(0L, length(cpg_sites)),
+      Meth_Pct = rep(NA_real_, length(cpg_sites))
+    )
+    return(list(
+      overall = NA_real_, sd_cpg = NA_real_, se_cpg = NA_real_,
+      sd_seq = NA_real_, se_seq = NA_real_,
+      status = if (nrow(df_summary) == 0L) "no_input_data" else "no_cpg_calls",
+      cpg_table = empty_cpg_stats
+    ))
+  }
   if (mode == "NGS") {
     parsed_count <- suppressWarnings(as.integer(str_extract(
       df_long$ReadID, "(?<=Count)\\d+"
@@ -316,7 +330,8 @@ calculate_quma_stats <- function(res_obj, mode = "Sanger") {
                                                                    by = "Position") %>% replace_na(list(Num_Meth = 0, Num_Total = 0, 
                                                                                                         Meth_Pct = NA))
   return(list(overall = overall_meth, sd_cpg = sd_cpg, se_cpg = se_cpg, 
-              sd_seq = sd_seq, se_seq = se_seq, cpg_table = full_cpg_stats))
+              sd_seq = sd_seq, se_seq = se_seq, status = "ok",
+              cpg_table = full_cpg_stats))
 }
 
 .panda_sample_level_wilcoxon <- function(x, y) {
