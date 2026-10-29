@@ -9,7 +9,9 @@ run_bisulfite_alignment(
   min_identity = 90,
   min_conversion = 95,
   return_alignments = TRUE,
-  workers = 16L
+  workers = 16L,
+  alignment_type = "global-local",
+  reference_orientation = "auto"
 )
 
 process_ab1_files(
@@ -26,6 +28,8 @@ process_ab1_files(
   \item{min_conversion}{Minimum non-CpG conversion percentage.}
   \item{return_alignments}{Whether to retain printable pairwise alignments.}
   \item{workers}{Number of parallel workers, capped at 16.}
+  \item{alignment_type}{\code{"global-local"} aligns each complete read to a subsequence of the amplicon without penalizing unobserved reference ends; \code{"global"} retains the historical scoring for comparison.}
+  \item{reference_orientation}{\code{"auto"} applies the non-CpG conversion heuristic; \code{"forward"} and \code{"reverse"} force the supplied reference orientation.}
   \item{file_paths}{Character vector of AB1 file paths.}
   \item{file_names}{Names assigned to the resulting sequences.}
   \item{trim_start}{Number of bases trimmed from the start of each AB1-derived sequence.}
@@ -33,8 +37,9 @@ process_ab1_files(
 }
 \value{
 \code{run_bisulfite_alignment()} returns reference-coordinate CpG calls,
-per-record quality summaries, reference information, counts, and optional
-alignment text. \code{process_ab1_files()} returns a \code{DNAStringSet}.
+per-record quality summaries with supplied-reference alignment coordinates,
+reference information, strand diagnostics, counts, and optional alignment text.
+\code{process_ab1_files()} returns a \code{DNAStringSet}.
 }
 \description{
 Aligns bisulfite-converted amplicon sequences to a defined reference and calls
